@@ -77,23 +77,25 @@ def is_admin(user_id):
 
 async def refresh_panel(channel: discord.TextChannel):
     """
-    删除旧面板，发送新面板，实现“永远在最新”
+    修改版：扫描最近的历史消息，删除所有 Bot 自己发的消息，确保只留一个新的
     """
-    panels = db.get("active_panels")
-    channel_id_str = str(channel.id)
-    
-    # 尝试删除旧消息
-    if channel_id_str in panels:
-        old_msg_id = panels[channel_id_str]
-        try:
-            old_msg = await channel.fetch_message(old_msg_id)
-            await old_msg.delete()
-        except discord.NotFound:
-            pass # 消息可能已经被手动删除了
-        except Exception as e:
-            print(f"删除旧面板时出错 (ID: {old_msg_id}): {e}")
+    # 1. 尝试清除该频道内最近 100 条消息里，Bot 自己发的旧面板
+    # 这样可以解决“残留多个面板”的问题
+    try:
+        # 获取最近 100 条消息
+        async for message in channel.history(limit=100):
+            # 如果消息作者是 Bot 自己，并且不是刚刚那条正在处理的用户指令（防止误删，虽然一般没事）
+            if message.author.id == bot.user.id:
+                try:
+                    await message.delete()
+                except discord.NotFound:
+                    pass # 已经被删了
+                except Exception as e:
+                    print(f"删除旧消息失败: {e}")
+    except Exception as e:
+        print(f"读取历史消息失败: {e}")
 
-    # 构建 Embed
+    # 2. 构建新的 Embed
     home = db.get("home_content")
     embed = discord.Embed(
         title=home["title"],
@@ -101,12 +103,13 @@ async def refresh_panel(channel: discord.TextChannel):
         color=0xffc0cb # 象牙色/粉色系
     )
     
-    # 发送新消息
+    # 3. 发送新消息
     view = MainPanelView()
     msg = await channel.send(embed=embed, view=view)
     
-    # 更新数据库
-    panels[channel_id_str] = msg.id
+    # 4. 仍然更新数据库（虽然依赖度降低了，但留着备用）
+    panels = db.get("active_panels")
+    panels[str(channel.id)] = msg.id
     db.set("active_panels", panels)
 
 # ================= UI 组件 (Views & Modals) =================
