@@ -1,59 +1,47 @@
 import discord
 from discord.ext import commands
-from discord.commands import Option
 import json
 import os
 import re
 from dotenv import load_dotenv
 
-# 加载 .env 文件
+# 加载环境变量
 load_dotenv()
 
 # ================= 配置区域 =================
-# 从环境变量获取 Token
-BOT_TOKEN = os.getenv('BOT_TOKEN') 
-ADMIN_ID = 1353777207042113576
-DEFAULT_CHANNEL_ID = 1441432695988162560
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+SUPER_ADMIN_ID = 1353777207042113576  # 你的 ID (超级管理员)
 DATA_FILE = "data.json"
 
-# ================= 默认数据 =================
-DEFAULT_HOME_CONTENT = {
-    "title": "🏛️象牙塔自助小餐车",
-    "author": "电波系",
-    "version": "1.0.0 Ver",
-    "welcome": "> 欢迎使用【象牙塔自助bot】！本bot旨在小伙伴们遇到问题时可以快速解决/自助答疑（让电波系偷懒一下），宝宝们如果遇到问题，可以在bot菜单里自查；如果无法解决，欢迎**带上截图和清晰报错**在本频道提问~\n\n**回顶链接：** https://discord.com/channels/1384945301780955246/1441432695988162560/1441432695988162560",
-    "downloads": "## ⬇️下载直达\n**预设本体：** https://discord.com/channels/1384945301780955246/1441432695988162560/1445783278068961310\n**最新版正则：** https://discord.com/channels/1384945301780955246/1441432695988162560/1445783366636015747\n**快速回复：** https://discord.com/channels/1384945301780955246/1441432695988162560/1445783419081719838"
+# ================= 默认模板 =================
+# 当新频道被授权时，会使用这份数据初始化
+DEFAULT_TEMPLATE = {
+    "manager_id": 0,           # 频道负责人 ID
+    "color": 0xffc0cb,         # 默认颜色 (粉色)
+    "title": "🛒预设自助小餐车",
+    "author": "未知",
+    "version": "未知",
+    "welcome": "> 欢迎使用自助答疑系统\n\n贴主可使用命令自行配置\n\n请点击下方按钮开始使用。",
+    "downloads": "## ⬇️下载直达\n暂无链接",
+    "qa_list": []              # 默认为空
 }
-
-DEFAULT_QA_LIST = [
-    {"q": "心绪回响显示不全/塔罗没有角色心声模块", "a": "寸不己……！是我没调整好！下个版本改😭古风版本的心绪回响和状态栏也在计划中了!"},
-    {"q": "容易截断或者空回", "a": "推荐开非流，如果是玩比较敏感的内容，可以看说明打开底部模块三选一"},
-    {"q": "美化太多了有点卡", "a": "可选部分的正则美化都是可选的，如果太卡了关掉就可以啦!可以直接看原始文字内容"},
-    {"q": "🚗总是容易一轮游", "a": "玩🚗的时候一定一定要把【涩个不停】+【一键开关】+【课堂摘要】一起打开哦!不喊停绝不停，推荐字数也适当调低一下"},
-    {"q": "开抢话不抢/开不抢话使劲抢", "a": "3.0的神秘bug……可以开一条抢/不抢，下一条是你想要的抢/不抢最终效果，哈基米可以学习到变化，下个版本也对抢话检查做了优化，目前感觉很有效"},
-    {"q": "角色突然超雄变得很凶", "a": "【研究课题-灰色】是给凶角色防软化用的，如果你的角色不是这种类型不要打开，下个版本也会设计一个介于灰色和温柔中间的研究课题"},
-    {"q": "想用来玩克劳德可以吗", "a": "正常用的话当然!只适合官，曲奇不行，但是因为我不玩所以不太清楚具体效果怎么样"},
-    {"q": "角色老是读取用户心理", "a": "推荐发消息的时候，用不同格式把用户的对话、心理区分开，又想了一个防全知的办法总之下个版本试试……"},
-    {"q": "文字出现错乱和乱码问题", "a": "温度调太高了，在象牙塔页面把温度调到1即可"},
-    {"q": "各种奇怪的符号词语增殖/短句泛滥", "a": "删掉异常的消息，执行一下大总结，隐藏前文然后再继续聊"}
-]
 
 # ================= 数据管理 =================
 class DataManager:
     def __init__(self):
         self.data = {
-            "allowed_channels": [DEFAULT_CHANNEL_ID],
-            "home_content": DEFAULT_HOME_CONTENT,
-            "qa_list": DEFAULT_QA_LIST,
-            "active_panels": {} # {str(channel_id): message_id}
+            "channels": {} # 结构: { "channel_id_str": { ...配置... } }
         }
         self.load_data()
 
     def load_data(self):
         if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                self.data.update(loaded)
+            try:
+                with open(DATA_FILE, "r", encoding="utf-8") as f:
+                    self.data = json.load(f)
+            except Exception as e:
+                print(f"数据文件损坏，已重置: {e}")
+                self.save_data()
         else:
             self.save_data()
 
@@ -61,81 +49,114 @@ class DataManager:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
 
-    def get(self, key):
-        return self.data.get(key)
+    def get_channel_config(self, channel_id):
+        return self.data["channels"].get(str(channel_id))
 
-    def set(self, key, value):
-        self.data[key] = value
+    def set_channel_config(self, channel_id, config):
+        self.data["channels"][str(channel_id)] = config
         self.save_data()
+
+    def is_authorized(self, channel_id):
+        return str(channel_id) in self.data["channels"]
 
 db = DataManager()
 bot = discord.Bot()
 
-# ================= 辅助函数 =================
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+# ================= 权限检查辅助函数 =================
+
+def is_super_admin(user_id):
+    return user_id == SUPER_ADMIN_ID
+
+def check_permission(ctx):
+    """
+    检查权限：
+    1. 超级管理员可以在任何地方操作。
+    2. 频道负责人在自己的频道操作。
+    """
+    cid = str(ctx.channel.id)
+    config = db.get_channel_config(cid)
+    
+    # 1. 如果频道没在数据库里，说明没授权
+    if not config:
+        return False, "❌ 此频道尚未获得授权，请联系管理员。"
+
+    # 2. 权限判断
+    user_id = ctx.author.id
+    if user_id == SUPER_ADMIN_ID or user_id == config["manager_id"]:
+        return True, None
+    else:
+        return False, "❌ 你没有权限管理此频道的面板。"
+
+# ================= 核心功能函数 =================
 
 async def refresh_panel(channel: discord.TextChannel):
     """
-    修改版：扫描最近的历史消息，删除所有 Bot 自己发的消息，确保只留一个新的
+    刷新面板：清理旧消息 -> 发送新面板
     """
-    # 1. 尝试清除该频道内最近 100 条消息里，Bot 自己发的旧面板
-    # 这样可以解决“残留多个面板”的问题
+    cid = str(channel.id)
+    config = db.get_channel_config(cid)
+    
+    if not config:
+        return # 未授权频道不处理
+
+    # 1. 扫荡旧消息 (只删除 Bot 发的)
     try:
-        # 获取最近 100 条消息
-        async for message in channel.history(limit=100):
-            # 如果消息作者是 Bot 自己，并且不是刚刚那条正在处理的用户指令（防止误删，虽然一般没事）
+        async for message in channel.history(limit=30):
             if message.author.id == bot.user.id:
                 try:
                     await message.delete()
-                except discord.NotFound:
-                    pass # 已经被删了
-                except Exception as e:
-                    print(f"删除旧消息失败: {e}")
+                except:
+                    pass
     except Exception as e:
-        print(f"读取历史消息失败: {e}")
+        print(f"清理消息失败: {e}")
 
-    # 2. 构建新的 Embed
-    home = db.get("home_content")
+    # 2. 构建 Embed
+    # 使用该频道独立的配置
     embed = discord.Embed(
-        title=home["title"],
-        description=f"作者：{home['author']}\n适用版本：{home['version']}\n\n{home['welcome']}\n\n---\n{home['downloads']}",
-        color=0xffc0cb # 象牙色/粉色系
+        title=config["title"],
+        description=f"作者：{config['author']}\n适用版本：{config['version']}\n\n{config['welcome']}\n\n---\n{config['downloads']}",
+        color=config["color"]
     )
     
-    # 3. 发送新消息
-    view = MainPanelView()
-    msg = await channel.send(embed=embed, view=view)
-    
-    # 4. 仍然更新数据库（虽然依赖度降低了，但留着备用）
-    panels = db.get("active_panels")
-    panels[str(channel.id)] = msg.id
-    db.set("active_panels", panels)
+    # 3. 发送
+    # 将 channel_id 传入 View，以便按钮回调时知道去读取哪个频道的数据
+    view = MainPanelView(cid)
+    await channel.send(embed=embed, view=view)
 
-# ================= UI 组件 (Views & Modals) =================
+
+# ================= UI 组件 =================
 
 # 1. 主面板按钮
 class MainPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None) # 持久化视图
+    def __init__(self, channel_id_str):
+        super().__init__(timeout=None)
+        self.channel_id_str = channel_id_str
 
     @discord.ui.button(label="🗳️ 自助答疑", style=discord.ButtonStyle.primary, custom_id="ivory_qa_btn")
     async def callback(self, button, interaction: discord.Interaction):
-        # 点击后展示下拉菜单，Ephemeral=True
-        view = QADropdownView()
+        # 传入当前频道ID，让下拉菜单知道去读哪份数据
+        view = QADropdownView(str(interaction.channel_id))
+        
+        # 检查该频道是否有 QA
+        config = db.get_channel_config(str(interaction.channel_id))
+        if not config or not config["qa_list"]:
+             await interaction.response.send_message("暂无答疑内容。", ephemeral=True)
+             return
+
         await interaction.response.send_message("请选择您遇到的问题：", view=view, ephemeral=True)
 
 # 2. Q&A 下拉菜单
 class QADropdownView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=180) 
-        self.add_item(QASelect())
-
-# ================= 修改 QASelect 类 =================
+    def __init__(self, channel_id_str):
+        super().__init__(timeout=180)
+        self.add_item(QASelect(channel_id_str))
 
 class QASelect(discord.ui.Select):
-    def __init__(self):
-        qa_list = db.get("qa_list")
+    def __init__(self, channel_id_str):
+        self.channel_id_str = channel_id_str
+        config = db.get_channel_config(channel_id_str)
+        qa_list = config["qa_list"] if config else []
+        
         options = []
         for idx, item in enumerate(qa_list[:25]): 
             label = item["q"][:95] + "..." if len(item["q"]) > 95 else item["q"]
@@ -150,109 +171,123 @@ class QASelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         idx = int(self.values[0])
-        qa_list = db.get("qa_list")
+        config = db.get_channel_config(self.channel_id_str)
         
-        if 0 <= idx < len(qa_list):
-            qa = qa_list[idx]
+        if config and 0 <= idx < len(config["qa_list"]):
+            qa = config["qa_list"][idx]
             raw_text = qa['a']
             
-            # --- 核心逻辑：提取多张图片并清洗文本 ---
-            
-            # 1. 提取 Markdown 图片链接 ![xxx](url)
+            # --- 图片提取与清洗逻辑 ---
             md_images = re.findall(r'!\[.*?\]\((https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?)\)', raw_text, re.IGNORECASE)
-            
-            # 2. 提取裸露的图片链接 http://xxx.jpg (排除掉已经在 markdown 里的)
-            # 这一步比较复杂，为了简单起见，我们优先处理 MD 格式。
-            # 如果你的习惯是只用 MD 格式，上面那行就够了。
-            
-            # 3. 清洗文本：把 ![xxx](url) 从文本中删掉，只保留文字描述
-            # 这样文字显示在上方，图片显示在下方，不会重复显示
             clean_text = re.sub(r'!\[.*?\]\(https?://.*?\)', '', raw_text).strip()
             
-            # 如果清洗后没字了（只有图），就放个占位符，或者保留原标题
             if not clean_text:
                 clean_text = "（查看下方图片详情）"
 
-            # --- 构建 Embed 列表 ---
             embeds = []
+            # 使用频道自定义的颜色
+            theme_color = config.get("color", 0xffc0cb)
+
+            main_embed = discord.Embed(title=f"Q: {qa['q']}", description=clean_text, color=theme_color)
             
-            # 第一个 Embed：主要负责显示 标题 和 文字内容
-            main_embed = discord.Embed(title=f"Q: {qa['q']}", description=clean_text, color=0x7289da)
-            
-            # 如果有一张或多张图
             if md_images:
-                # 把第一张图设为第一个 Embed 的主图
                 main_embed.set_image(url=md_images[0])
                 embeds.append(main_embed)
-                
-                # 如果还有第2、3...张图，为它们创建单独的 Embed
-                # Discord 限制一条消息最多 10 个 Embed
-                for img_url in md_images[1:4]: # 限制最多额外显示3张（共4张），防止太长
-                    img_embed = discord.Embed(url="https://discord.com", color=0x7289da) # url 设为同一个可以更紧凑
+                for img_url in md_images[1:4]: 
+                    img_embed = discord.Embed(url="https://discord.com", color=theme_color)
                     img_embed.set_image(url=img_url)
                     embeds.append(img_embed)
             else:
-                # 如果没图，就只发文字 Embed
                 embeds.append(main_embed)
 
-            # 发送 Embeds 列表 (注意参数是 embeds=[...])
             await interaction.response.send_message(embeds=embeds, ephemeral=True)
-            
         else:
             await interaction.response.send_message("未找到该问题内容。", ephemeral=True)
 
-# 3. 添加 Q&A 的弹窗
+# 3. 弹窗：新增 QA
 class AddQAModal(discord.ui.Modal):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, channel_id_str):
+        super().__init__(title="新增自助答疑内容")
+        self.channel_id_str = channel_id_str
         self.add_item(discord.ui.InputText(label="问题 (Q)", placeholder="请输入问题标题..."))
-        self.add_item(discord.ui.InputText(label="回答 (A)", placeholder="支持 Markdown 格式...", style=discord.InputTextStyle.long))
+        self.add_item(discord.ui.InputText(label="回答 (A)", placeholder="支持 Markdown 和图片链接...", style=discord.InputTextStyle.long))
 
     async def callback(self, interaction: discord.Interaction):
         q = self.children[0].value
         a = self.children[1].value
         
-        qa_list = db.get("qa_list")
-        qa_list.append({"q": q, "a": a})
-        db.set("qa_list", qa_list)
-        
-        await interaction.response.send_message(f"✅ 已添加问题：{q}", ephemeral=True)
-        # 刷新当前频道的面板
-        if interaction.channel_id in db.get("allowed_channels"):
+        config = db.get_channel_config(self.channel_id_str)
+        if config:
+            config["qa_list"].append({"q": q, "a": a})
+            db.set_channel_config(self.channel_id_str, config)
+            await interaction.response.send_message(f"✅ 已添加问题：{q}", ephemeral=True)
             await refresh_panel(interaction.channel)
 
-# 4. 编辑主页内容的弹窗
-class EditHomeModal(discord.ui.Modal):
-    def __init__(self, current_data):
-        super().__init__(title="编辑主页内容")
-        self.add_item(discord.ui.InputText(label="标题", value=current_data["title"]))
-        self.add_item(discord.ui.InputText(label="版本号", value=current_data["version"]))
-        self.add_item(discord.ui.InputText(label="欢迎语 (支持MD)", value=current_data["welcome"], style=discord.InputTextStyle.long))
-        self.add_item(discord.ui.InputText(label="下载链接区 (支持MD)", value=current_data["downloads"], style=discord.InputTextStyle.long))
+# 4. 弹窗：编辑基本信息 (Profile) - 标题、作者、颜色
+class EditProfileModal(discord.ui.Modal):
+    def __init__(self, config):
+        super().__init__(title="编辑面板外观")
+        self.channel_id_str = str(config["channel_id"]) # 临时存一下方便调用
+        
+        self.add_item(discord.ui.InputText(label="标题", value=config["title"]))
+        self.add_item(discord.ui.InputText(label="作者名", value=config["author"]))
+        self.add_item(discord.ui.InputText(label="版本号", value=config["version"]))
+        
+        # 颜色转换：Int -> Hex String
+        hex_color = "#{:06x}".format(config["color"])
+        self.add_item(discord.ui.InputText(label="颜色 (Hex格式, 如 #FF0000)", value=hex_color, min_length=7, max_length=7))
 
     async def callback(self, interaction: discord.Interaction):
-        new_data = {
-            "title": self.children[0].value,
-            "author": db.get("home_content")["author"], # 作者保持不变
-            "version": self.children[1].value,
-            "welcome": self.children[2].value,
-            "downloads": self.children[3].value
-        }
-        db.set("home_content", new_data)
-        await interaction.response.send_message("✅ 主页内容已更新，正在刷新面板...", ephemeral=True)
+        config = db.get_channel_config(interaction.channel.id)
         
-        if interaction.channel_id in db.get("allowed_channels"):
+        # 处理颜色
+        color_str = self.children[3].value
+        try:
+            # 把 #FF0000 转为 0xFF0000 (int)
+            color_int = int(color_str.replace("#", ""), 16)
+        except:
+            color_int = 0xffc0cb # 转换失败回退默认粉色
+
+        if config:
+            config["title"] = self.children[0].value
+            config["author"] = self.children[1].value
+            config["version"] = self.children[2].value
+            config["color"] = color_int
+            
+            db.set_channel_config(str(interaction.channel.id), config)
+            await interaction.response.send_message("✅ 外观信息已更新。", ephemeral=True)
             await refresh_panel(interaction.channel)
 
-# 5. 删除 Q&A 的选择视图
+# 5. 弹窗：编辑正文内容 (Content)
+class EditContentModal(discord.ui.Modal):
+    def __init__(self, config):
+        super().__init__(title="编辑面板正文")
+        self.add_item(discord.ui.InputText(label="欢迎语 (支持MD)", value=config["welcome"], style=discord.InputTextStyle.long))
+        self.add_item(discord.ui.InputText(label="下载链接区 (支持MD)", value=config["downloads"], style=discord.InputTextStyle.long))
+
+    async def callback(self, interaction: discord.Interaction):
+        config = db.get_channel_config(str(interaction.channel.id))
+        if config:
+            config["welcome"] = self.children[0].value
+            config["downloads"] = self.children[1].value
+            
+            db.set_channel_config(str(interaction.channel.id), config)
+            await interaction.response.send_message("✅ 正文内容已更新。", ephemeral=True)
+            await refresh_panel(interaction.channel)
+
+# 6. 删除 QA 选择视图
 class DeleteQAView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, channel_id_str):
         super().__init__(timeout=60)
-        self.add_item(DeleteQASelect())
+        self.channel_id_str = channel_id_str
+        self.add_item(DeleteQASelect(channel_id_str))
 
 class DeleteQASelect(discord.ui.Select):
-    def __init__(self):
-        qa_list = db.get("qa_list")
+    def __init__(self, channel_id_str):
+        self.channel_id_str = channel_id_str
+        config = db.get_channel_config(channel_id_str)
+        qa_list = config["qa_list"] if config else []
+        
         options = []
         for idx, item in enumerate(qa_list[:25]):
             label = item["q"][:95]
@@ -262,120 +297,114 @@ class DeleteQASelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         idx = int(self.values[0])
-        qa_list = db.get("qa_list")
+        config = db.get_channel_config(self.channel_id_str)
         
-        if 0 <= idx < len(qa_list):
-            removed = qa_list.pop(idx)
-            db.set("qa_list", qa_list)
+        if config and 0 <= idx < len(config["qa_list"]):
+            removed = config["qa_list"].pop(idx)
+            db.set_channel_config(self.channel_id_str, config)
             await interaction.response.send_message(f"✅ 已删除：{removed['q']}", ephemeral=True)
-            # 刷新面板
-            if interaction.channel_id in db.get("allowed_channels"):
-                await refresh_panel(interaction.channel)
+            await refresh_panel(interaction.channel)
         else:
-            await interaction.response.send_message("删除失败，索引无效。", ephemeral=True)
+            await interaction.response.send_message("删除失败。", ephemeral=True)
 
 # ================= Bot 事件与指令 =================
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("--------------------------------------------------")
-    print(f"管理员 ID: {ADMIN_ID}")
-    print(f"默认频道 ID: {DEFAULT_CHANNEL_ID}")
-    print("--------------------------------------------------")
-    # 注册持久化视图，确保重启后按钮依然有效
-    bot.add_view(MainPanelView())
-
-# --- 管理员指令 ---
-
-@bot.slash_command(name="setup_panel", description="[管理员] 初始化或刷新当前频道的自助餐车面板")
-async def setup_panel(ctx):
-    if not is_admin(ctx.author.id):
-        return await ctx.respond("❌ 你没有权限执行此操作。", ephemeral=True)
-    
-    allowed = db.get("allowed_channels")
-    if ctx.channel.id not in allowed:
-        return await ctx.respond(f"❌ 此频道 ({ctx.channel.id}) 未被授权。请先使用 `/add_channel`。", ephemeral=True)
-
-    await ctx.respond("🔄 正在生成/刷新面板...", ephemeral=True)
-    await refresh_panel(ctx.channel)
-
-@bot.slash_command(name="add_qa", description="[管理员] 新增一条 Q&A 内容")
-async def add_qa(ctx):
-    if not is_admin(ctx.author.id):
-        return await ctx.respond("❌ 你没有权限执行此操作。", ephemeral=True)
-    
-    modal = AddQAModal(title="新增自助答疑内容")
-    await ctx.send_modal(modal)
-
-@bot.slash_command(name="delete_qa", description="[管理员] 删除一条 Q&A 内容")
-async def delete_qa(ctx):
-    if not is_admin(ctx.author.id):
-        return await ctx.respond("❌ 你没有权限执行此操作。", ephemeral=True)
-    
-    qa_list = db.get("qa_list")
-    if not qa_list:
-        return await ctx.respond("目前没有 Q&A 内容。", ephemeral=True)
-        
-    await ctx.respond("请选择要删除的问题：", view=DeleteQAView(), ephemeral=True)
-
-@bot.slash_command(name="edit_home", description="[管理员] 修改面板主页内容")
-async def edit_home(ctx):
-    if not is_admin(ctx.author.id):
-        return await ctx.respond("❌ 你没有权限执行此操作。", ephemeral=True)
-    
-    current_data = db.get("home_content")
-    modal = EditHomeModal(current_data)
-    await ctx.send_modal(modal)
-
-@bot.slash_command(name="add_channel", description="[管理员] 授权当前频道使用 Bot")
-async def add_channel(ctx):
-    if not is_admin(ctx.author.id):
-        return await ctx.respond("❌ 你没有权限执行此操作。", ephemeral=True)
-    
-    allowed = db.get("allowed_channels")
-    if ctx.channel.id not in allowed:
-        allowed.append(ctx.channel.id)
-        db.set("allowed_channels", allowed)
-        await ctx.respond(f"✅ 已授权频道：{ctx.channel.name} (ID: {ctx.channel.id})", ephemeral=True)
-    else:
-        await ctx.respond("⚠️ 当前频道已在授权列表中。", ephemeral=True)
-
-@bot.slash_command(name="remove_channel", description="[管理员] 移除当前频道的授权")
-async def remove_channel(ctx):
-    if not is_admin(ctx.author.id):
-        return await ctx.respond("❌ 你没有权限执行此操作。", ephemeral=True)
-    
-    allowed = db.get("allowed_channels")
-    if ctx.channel.id in allowed:
-        allowed.remove(ctx.channel.id)
-        db.set("allowed_channels", allowed)
-        await ctx.respond(f"✅ 已移除频道授权：{ctx.channel.name}", ephemeral=True)
-    else:
-        await ctx.respond("⚠️ 当前频道不在授权列表中。", ephemeral=True)
-
-# ================= 自动监听消息 =================
+    print(f"Logged in as {bot.user}")
+    print("-------------------------")
+    # 注册持久化视图时，这里其实无法预知所有频道ID，
+    # 但 MainPanelView 的 custom_id 是固定的，这通常对无状态按钮够用了。
+    # 真正的持久化需要更复杂的处理，但在这里只要 Bot 不重启，内存里的 View 都在。
+    # 重启后，只要用户点击按钮，会触发 interaction，如果 custom_id 匹配，我们需要重新挂载逻辑。
+    # Py-cord 允许在 on_ready 注册一个无状态的 View 类。
+    # 但由于我们需要传入 channel_id，这里简化处理：不全局注册，依赖指令重新唤醒面板。
+    print("Bot 就绪。请使用 /auth_channel 授权频道。")
 
 @bot.event
 async def on_message(message):
-    # 1. 如果是 Bot 自己发的消息，直接忽略，防止无限循环
     if message.author.id == bot.user.id:
         return
+    
+    # 只有已授权的频道才触发自动刷新
+    if db.is_authorized(message.channel.id):
+        await refresh_panel(message.channel)
 
-    # 2. 检查这条消息是否在“授权频道”里
-    allowed_channels = db.get("allowed_channels")
-    if message.channel.id in allowed_channels:
-        # 3. 触发刷新面板：删除旧面板 -> 发送新面板
-        # 这样面板就会永远保持在最新一条
-        try:
-            await refresh_panel(message.channel)
-        except Exception as e:
-            print(f"自动刷新面板失败: {e}")
+# --- 核心管理指令 ---
 
-# 启动 Bot
+@bot.slash_command(name="auth_channel", description="[超级管理] 授权当前频道并指定负责人")
+async def auth_channel(ctx, manager: discord.User):
+    """
+    只有超级管理员可以用。
+    用法: /auth_channel @某人
+    """
+    if not is_super_admin(ctx.author.id):
+        return await ctx.respond("❌ 只有超级管理员可以使用此指令。", ephemeral=True)
+
+    cid = str(ctx.channel.id)
+    
+    # 初始化该频道的配置
+    new_config = DEFAULT_TEMPLATE.copy()
+    new_config["manager_id"] = manager.id
+    new_config["qa_list"] = [] # 确保新频道是空的 QA
+    
+    db.set_channel_config(cid, new_config)
+    
+    await ctx.respond(f"✅ 频道授权成功！\n负责人: {manager.mention}\n现在负责人可以使用 `/setup_panel` 初始化面板了。", ephemeral=True)
+
+@bot.slash_command(name="setup_panel", description="[负责人] 初始化/刷新面板")
+async def setup_panel(ctx):
+    has_perm, msg = check_permission(ctx)
+    if not has_perm:
+        return await ctx.respond(msg, ephemeral=True)
+    
+    await ctx.respond("🔄 正在生成面板...", ephemeral=True)
+    await refresh_panel(ctx.channel)
+
+@bot.slash_command(name="add_qa", description="[负责人] 新增 QA")
+async def add_qa(ctx):
+    has_perm, msg = check_permission(ctx)
+    if not has_perm:
+        return await ctx.respond(msg, ephemeral=True)
+    
+    modal = AddQAModal(str(ctx.channel.id))
+    await ctx.send_modal(modal)
+
+@bot.slash_command(name="delete_qa", description="[负责人] 删除 QA")
+async def delete_qa(ctx):
+    has_perm, msg = check_permission(ctx)
+    if not has_perm:
+        return await ctx.respond(msg, ephemeral=True)
+    
+    config = db.get_channel_config(ctx.channel.id)
+    if not config or not config["qa_list"]:
+        return await ctx.respond("暂无 QA 内容。", ephemeral=True)
+
+    await ctx.respond("请选择要删除的问题：", view=DeleteQAView(str(ctx.channel.id)), ephemeral=True)
+
+@bot.slash_command(name="edit_profile", description="[负责人] 修改标题、作者、颜色等")
+async def edit_profile(ctx):
+    has_perm, msg = check_permission(ctx)
+    if not has_perm:
+        return await ctx.respond(msg, ephemeral=True)
+    
+    config = db.get_channel_config(ctx.channel.id)
+    # 注入 channel_id 方便 modal 使用
+    config["channel_id"] = ctx.channel.id 
+    await ctx.send_modal(EditProfileModal(config))
+
+@bot.slash_command(name="edit_content", description="[负责人] 修改欢迎语和下载链接")
+async def edit_content(ctx):
+    has_perm, msg = check_permission(ctx)
+    if not has_perm:
+        return await ctx.respond(msg, ephemeral=True)
+    
+    config = db.get_channel_config(ctx.channel.id)
+    await ctx.send_modal(EditContentModal(config))
+
+# 启动
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        print("❌ 错误：未在环境变量或 .env 文件中找到 BOT_TOKEN。")
-        print("请创建一个 .env 文件并添加：BOT_TOKEN=你的Token")
+        print("未找到 Token")
     else:
         bot.run(BOT_TOKEN)
