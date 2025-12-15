@@ -3,6 +3,7 @@ from discord.ext import commands
 import json
 import os
 import re
+import asyncio
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -89,39 +90,63 @@ def check_permission(ctx):
 
 # ================= 核心功能函数 =================
 
+# 用于防止并发刷新的锁标志
+is_refreshing = False 
+
 async def refresh_panel(channel: discord.TextChannel):
     """
-    刷新面板：清理旧消息 -> 发送新面板
+    刷新面板：扫描旧消息 -> 发送新面板，并加入并发控制
     """
+    global is_refreshing
     cid = str(channel.id)
     config = db.get_channel_config(cid)
     
     if not config:
         return # 未授权频道不处理
 
-    # 1. 扫荡旧消息 (只删除 Bot 发的)
-    try:
-        async for message in channel.history(limit=30):
-            if message.author.id == bot.user.id:
-                try:
-                    await message.delete()
-                except:
-                    pass
-    except Exception as e:
-        print(f"清理消息失败: {e}")
+    # --- 并发控制开始 ---
+    # 如果正在刷新，则等待 0.5 秒后再试（简单轮询）
+    # 实际应用中更健壮的方式是用 asyncio.Lock，但这里用标志位简化
+    while is_refreshing:
+        await asyncio.sleep(0.5) # 等待 0.5 秒
 
-    # 2. 构建 Embed
-    # 使用该频道独立的配置
-    embed = discord.Embed(
-        title=config["title"],
-        description=f"作者：{config['author']}\n适用版本：{config['version']}\n\n{config['welcome']}\n\n---\n{config['downloads']}",
-        color=config["color"]
-    )
-    
-    # 3. 发送
-    # 将 channel_id 传入 View，以便按钮回调时知道去读取哪个频道的数据
-    view = MainPanelView(cid)
-    await channel.send(embed=embed, view=view)
+    # 标记为正在刷新
+    is_refreshing = True
+    # --- 并发控制结束 ---
+
+    try:
+        # 1. 扫荡旧消息 (只删除 Bot 发的)
+        try:
+            async for message in channel.history(limit=30):
+                if message.author.id == bot.user.id:
+                    try:
+                        await message.delete()
+                    except discord.NotFound:
+                        pass
+                    except Exception as e:
+                        print(f"删除旧消息失败: {e}")
+        except Exception as e:
+            print(f"读取历史消息失败: {e}")
+
+        # 2. 构建新的 Embed
+        embed = discord.Embed(
+            title=config["title"],
+            description=f"作者：{config['author']}\n适用版本：{config['version']}\n\n{config['welcome']}\n\n---\n{config['downloads']}",
+            color=config["color"]
+        )
+        
+        # 3. 发送
+        view = MainPanelView(cid) # MainPanelView 的 __init__ 需要传入 channel_id_str
+        await channel.send(embed=embed, view=view)
+        
+        # 4. 更新数据库 (仍然是必要的)
+        panels = db.get("channels") # 获取整个 channels 字典
+        panels[cid]["last_panel_message_id"] = msg.id # 假设你以后会用这个ID，虽然现在不直接用了
+        db.set("channels", panels) # 重新保存
+
+    finally:
+        # --- 刷新完毕，解除锁定 ---
+        is_refreshing = False
 
 
 # ================= UI 组件 =================
