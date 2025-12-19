@@ -136,40 +136,23 @@ class QuickQA(commands.Cog):
             json.dump(self.qa_data, f, ensure_ascii=False, indent=4)
 
     def parse_markdown_to_data(self, md_text):
-        """
-        新的解析逻辑：
-        # 标题 -> 作为 Key
-        标题下的所有内容（直到下一个 # 标题） -> 作为 Value
-        """
         lines = md_text.split('\n')
         new_data = {}
-        
         current_title = None
         current_content = []
 
         for line in lines:
             line = line.strip()
-            
-            # 检测一级标题 (Key)，例如 "# 第三方"
-            # 必须是 # 开头且紧跟空格，避免匹配到 ## 或 ###
+            # 识别一级标题作为 Key
             if line.startswith("# "):
-                # 保存上一个标题的内容
                 if current_title:
                     new_data[current_title] = "\n".join(current_content).strip()
-                
-                # 开始新的标题
                 current_title = line[2:].strip()
                 current_content = []
-            
             else:
-                # 只要不是一级标题，无论内容是什么（包括 ##, ###, 空行），都算作内容
                 if current_title:
-                    # 原样保留行首缩进可能更好，但 Discord 显示时 strip 也没关系
-                    # 这里为了排版整洁，我们保留非空行的内容，或者简单追加
-                    # 注意：如果 line 是空的，也要加进去保留段落感
                     current_content.append(line)
         
-        # 循环结束，保存最后一个
         if current_title:
             new_data[current_title] = "\n".join(current_content).strip()
             
@@ -177,22 +160,18 @@ class QuickQA(commands.Cog):
         return len(new_data)
 
     def export_data_to_markdown(self):
-        """将 JSON 转换回 Markdown 格式供导出"""
         md_lines = []
         for title, content in self.qa_data.items():
             md_lines.append(f"# {title}")
             md_lines.append(content)
-            md_lines.append("") # 两个词条间增加空行
+            md_lines.append("")
         return "\n".join(md_lines)
 
-    # ================= 自动补全逻辑 =================
     async def search_qa_titles(self, ctx: discord.AutocompleteContext):
-        """搜索建议：返回匹配的一级标题 Key"""
         user_input = ctx.value.lower()
         keys = list(self.qa_data.keys())
         if not user_input:
             return keys[:25]
-        
         filtered = [k for k in keys if user_input in k.lower()]
         return filtered[:25] 
 
@@ -211,33 +190,53 @@ class QuickQA(commands.Cog):
 
         content = self.qa_data[query]
         
-        # 提取第一张图片作为 Embed 封面 (可选)
+        # 1. 提取所有图片链接
+        # 匹配 http/https 开头的图片格式
         images = re.findall(r'(https?://.*?\.(?:png|jpg|jpeg|gif|webp))', content, re.IGNORECASE)
         
-        # 清洗文本：这里我们只稍微清洗一下 Markdown 图片语法，避免 Embed 里有了图片，正文里还有一串 URL
-        # 但保留其他 Markdown 格式（如 ##, ###, **bold**）
+        # 2. 清洗正文中的链接，使其不显示
         clean_text = content
-        # 可选：如果想在正文里隐藏图片链接（因为会在 Embed 显示），可以取消下面注释
-        # for img in images:
-        #     clean_text = clean_text.replace(img, "")
-        #     clean_text = re.sub(rf'!\[.*?\]\({re.escape(img)}\)', '', clean_text)
+        # 先去除 Markdown 图片语法 ![xxx](url)
+        clean_text = re.sub(r'!\[.*?\]\(https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?\)', '', clean_text, flags=re.IGNORECASE)
+        # 再去除裸露的图片链接
+        for img in images:
+            clean_text = clean_text.replace(img, "")
         
         clean_text = clean_text.strip()
+        if not clean_text:
+            clean_text = "（请查看下方图片详情）"
 
-        embed = discord.Embed(
+        # 3. 构建多 Embed
+        embeds = []
+        
+        # 主 Embed (放文字和第一张图)
+        main_embed = discord.Embed(
             title=f"💡 关于 {query}",
             description=f"{user.mention}\n\n{clean_text}",
             color=0x00ff00
         )
         
-        # 如果有图，取第一张放入 Embed
         if images:
-            embed.set_image(url=images[0])
+            # 第一张图给主 Embed
+            main_embed.set_image(url=images[0])
+            embeds.append(main_embed)
+            
+            # 剩余图片 (Discord 限制一次最多发 10 个 Embed，为了拼图好看通常再加 3 张凑 4 格)
+            # 我们这里取接下来的 3 张
+            for img_url in images[1:4]:
+                # 创建仅包含图片的子 Embed
+                sub_embed = discord.Embed(url="https://discord.com", color=0x00ff00)
+                sub_embed.set_image(url=img_url)
+                embeds.append(sub_embed)
+        else:
+            # 没图就只发主 Embed
+            embeds.append(main_embed)
 
-        # 公开发送
-        await ctx.respond(content=f"{user.mention} 看这里 👇", embed=embed)
+        # 4. 发送 Embed 列表
+        # 注意参数变成了 embeds (复数)
+        await ctx.respond(content=f"{user.mention} 看这里 👇", embeds=embeds)
 
-    # ================= 管理功能 (限权) =================
+    # ================= 管理功能 =================
     def is_qa_admin():
         def predicate(ctx):
             role = discord.utils.get(ctx.author.roles, id=ADMIN_ROLE_ID)
@@ -249,7 +248,6 @@ class QuickQA(commands.Cog):
     async def add_entry(self, ctx, title: str, content: str):
         if title in self.qa_data:
             return await ctx.respond("❌ 该标题已存在，请使用修改或先删除。", ephemeral=True)
-        
         self.qa_data[title] = content
         self.save_data()
         await ctx.respond(f"✅ 已添加条目：`{title}`", ephemeral=True)
@@ -259,7 +257,6 @@ class QuickQA(commands.Cog):
     async def edit_entry(self, ctx, title: Option(str, "选择条目", autocomplete=search_qa_titles), new_content: str):
         if title not in self.qa_data:
             return await ctx.respond("❌ 未找到该条目。", ephemeral=True)
-        
         self.qa_data[title] = new_content
         self.save_data()
         await ctx.respond(f"✅ 已更新条目：`{title}`", ephemeral=True)
@@ -280,7 +277,6 @@ class QuickQA(commands.Cog):
         md_content = self.export_data_to_markdown()
         with open("qa_export.md", "w", encoding="utf-8") as f:
             f.write(md_content)
-        
         file = discord.File("qa_export.md")
         await ctx.respond("✅ 当前答疑库备份如下：", file=file, ephemeral=True)
         os.remove("qa_export.md")
@@ -290,7 +286,6 @@ class QuickQA(commands.Cog):
     async def import_data(self, ctx, file: Option(discord.Attachment, "请上传 .txt 或 .md 文件")):
         if not file.filename.endswith(('.txt', '.md')):
             return await ctx.respond("❌ 请上传 .txt 或 .md 文件", ephemeral=True)
-        
         try:
             content_bytes = await file.read()
             content_str = content_bytes.decode('utf-8')
@@ -300,11 +295,20 @@ class QuickQA(commands.Cog):
         except Exception as e:
             await ctx.respond(f"❌ 导入失败: {e}", ephemeral=True)
 
+    @qa_group.command(name="初始化重置", description="[管理] ⚠️危险：清空所有数据并恢复为默认预设")
+    @is_qa_admin()
+    async def reset_to_default(self, ctx):
+        self.qa_data = {}
+        count = self.parse_markdown_to_data(INITIAL_MARKDOWN)
+        self.save_data()
+        await ctx.respond(f"✅ 已执行硬重置！数据已恢复为默认预设（共 {count} 条）。", ephemeral=True)
+
     @add_entry.error
     @edit_entry.error
     @delete_entry.error
     @export_data.error
     @import_data.error
+    @reset_to_default.error
     async def admin_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             await ctx.respond("🚫 你没有权限执行此操作 (需要指定身份组)。", ephemeral=True)
