@@ -176,7 +176,7 @@ class QuickQA(commands.Cog):
         return filtered[:25] 
 
     # ================= 命令组 =================
-    qa_group = SlashCommandGroup("快速答疑", "答疑库相关操作")
+    qa_group = SlashCommandGroup("快速答疑", "[管理]通过答疑库快捷答疑")
 
     @qa_group.command(name="回复", description="选择答疑库内容回复指定用户")
     async def reply_user(
@@ -317,3 +317,4 @@ class QuickQA(commands.Cog):
 
 def setup(bot):
     bot.add_cog(QuickQA(bot))
+
