@@ -9,7 +9,7 @@ import re
 QA_FILE = "qa_data.json"
 ADMIN_ROLE_ID = 1420698551138385982  # 指定的有权限操作的身份组ID
 
-# 初始数据文本 (你提供的Markdown)
+# 初始数据文本
 INITIAL_MARKDOWN = """
 # 快速回复
 ## ❓ 什么是快速回复：
@@ -136,82 +136,65 @@ class QuickQA(commands.Cog):
             json.dump(self.qa_data, f, ensure_ascii=False, indent=4)
 
     def parse_markdown_to_data(self, md_text):
-        """将 Markdown 文本解析为 {标题: 内容} 的字典"""
+        """
+        新的解析逻辑：
+        # 标题 -> 作为 Key
+        标题下的所有内容（直到下一个 # 标题） -> 作为 Value
+        """
         lines = md_text.split('\n')
-        current_category = "默认"
+        new_data = {}
+        
         current_title = None
         current_content = []
-        
-        new_data = {}
-
-        def save_buffer():
-            if current_title:
-                # 键名格式：[分类] 标题
-                key = f"【{current_category}】{current_title}" if current_category != "默认" else current_title
-                new_data[key] = "\n".join(current_content).strip()
 
         for line in lines:
             line = line.strip()
-            # 一级标题 (# ) -> 分类
+            
+            # 检测一级标题 (Key)，例如 "# 第三方"
+            # 必须是 # 开头且紧跟空格，避免匹配到 ## 或 ###
             if line.startswith("# "):
-                save_buffer() # 保存上一个
-                current_category = line[2:].strip()
-                current_title = None # 重置标题，因为这是大分类，本身不存内容
+                # 保存上一个标题的内容
+                if current_title:
+                    new_data[current_title] = "\n".join(current_content).strip()
+                
+                # 开始新的标题
+                current_title = line[2:].strip()
                 current_content = []
             
-            # 二级/三级标题 (## / ### ) -> 具体问题的关键词标题
-            elif line.startswith("## ") or line.startswith("### "):
-                save_buffer() # 保存上一个
-                # 去掉 # 号
-                clean_title = re.sub(r'^#+\s*', '', line).strip()
-                current_title = clean_title
-                current_content = []
-            
-            # 普通内容
             else:
-                if current_title or current_category:
-                    # 如果还没有 title，但有 category，说明这个内容属于 category 自身（如果有这种格式）
-                    # 你的数据里 "温度" 只有 # 温度 然后直接是内容
-                    if current_title is None and current_category and line:
-                         current_title = current_category # 把分类名当作标题
-                    
+                # 只要不是一级标题，无论内容是什么（包括 ##, ###, 空行），都算作内容
+                if current_title:
+                    # 原样保留行首缩进可能更好，但 Discord 显示时 strip 也没关系
+                    # 这里为了排版整洁，我们保留非空行的内容，或者简单追加
+                    # 注意：如果 line 是空的，也要加进去保留段落感
                     current_content.append(line)
         
-        save_buffer() # 保存最后一段
+        # 循环结束，保存最后一个
+        if current_title:
+            new_data[current_title] = "\n".join(current_content).strip()
+            
         self.qa_data = new_data
         return len(new_data)
 
     def export_data_to_markdown(self):
         """将 JSON 转换回 Markdown 格式供导出"""
         md_lines = []
-        # 按键名排序简单整理
-        for key, content in self.qa_data.items():
-            # 尝试分离分类和标题
-            if key.startswith("【") and "】" in key:
-                cat_end = key.find("】")
-                category = key[1:cat_end]
-                title = key[cat_end+1:]
-                # 注意：这里生成的 Markdown 不会完美还原原来的嵌套结构，
-                # 但能保证导入时逻辑一致。为了简单，我们统一用 ## 标题
-                md_lines.append(f"# {category}")
-                md_lines.append(f"## {title}")
-            else:
-                md_lines.append(f"# {key}")
-            
+        for title, content in self.qa_data.items():
+            md_lines.append(f"# {title}")
             md_lines.append(content)
-            md_lines.append("") # 空行
+            md_lines.append("") # 两个词条间增加空行
         return "\n".join(md_lines)
 
     # ================= 自动补全逻辑 =================
     async def search_qa_titles(self, ctx: discord.AutocompleteContext):
-        """搜索建议：返回匹配的标题 key"""
+        """搜索建议：返回匹配的一级标题 Key"""
         user_input = ctx.value.lower()
         keys = list(self.qa_data.keys())
         if not user_input:
             return keys[:25]
         
         filtered = [k for k in keys if user_input in k.lower()]
-        return filtered[:25] # Discord 限制最多显示25个选项
+        return filtered[:25] 
 
     # ================= 命令组 =================
     qa_group = SlashCommandGroup("快速答疑", "答疑库相关操作")
@@ -221,41 +204,42 @@ class QuickQA(commands.Cog):
         self, 
         ctx: discord.ApplicationContext, 
         user: Option(discord.User, "提问的用户"),
-        query: Option(str, "搜索问题关键词", autocomplete=search_qa_titles)
+        query: Option(str, "搜索关键词（一级标题）", autocomplete=search_qa_titles)
     ):
         if query not in self.qa_data:
             return await ctx.respond(f"❌ 未找到关键词 `{query}`，请检查拼写。", ephemeral=True)
 
         content = self.qa_data[query]
         
-        # 提取图片用于 Embed (可选优化)
+        # 提取第一张图片作为 Embed 封面 (可选)
         images = re.findall(r'(https?://.*?\.(?:png|jpg|jpeg|gif|webp))', content, re.IGNORECASE)
-        # 清理文本中的图片链接，避免重复显示
-        clean_text = content
-        for img in images:
-            clean_text = clean_text.replace(img, "")
-            # 也去掉 Markdown 图片语法 ![xx](url)
-            clean_text = re.sub(rf'!\[.*?\]\({re.escape(img)}\)', '', clean_text)
         
-        clean_text = clean_text.strip() or "（请查看图片）"
+        # 清洗文本：这里我们只稍微清洗一下 Markdown 图片语法，避免 Embed 里有了图片，正文里还有一串 URL
+        # 但保留其他 Markdown 格式（如 ##, ###, **bold**）
+        clean_text = content
+        # 可选：如果想在正文里隐藏图片链接（因为会在 Embed 显示），可以取消下面注释
+        # for img in images:
+        #     clean_text = clean_text.replace(img, "")
+        #     clean_text = re.sub(rf'!\[.*?\]\({re.escape(img)}\)', '', clean_text)
+        
+        clean_text = clean_text.strip()
 
         embed = discord.Embed(
             title=f"💡 关于 {query}",
-            description=f"{user.mention} \n\n{clean_text}",
+            description=f"{user.mention}\n\n{clean_text}",
             color=0x00ff00
         )
+        
+        # 如果有图，取第一张放入 Embed
         if images:
-            embed.set_image(url=images[0]) # 设置第一张图为大图
+            embed.set_image(url=images[0])
 
         # 公开发送
         await ctx.respond(content=f"{user.mention} 看这里 👇", embed=embed)
 
     # ================= 管理功能 (限权) =================
-    
-    # 权限检查装饰器
     def is_qa_admin():
         def predicate(ctx):
-            # 检查用户是否有指定身份组
             role = discord.utils.get(ctx.author.roles, id=ADMIN_ROLE_ID)
             return role is not None
         return commands.check(predicate)
@@ -264,11 +248,21 @@ class QuickQA(commands.Cog):
     @is_qa_admin()
     async def add_entry(self, ctx, title: str, content: str):
         if title in self.qa_data:
-            return await ctx.respond("❌ 该标题已存在，请使用修改命令。", ephemeral=True)
+            return await ctx.respond("❌ 该标题已存在，请使用修改或先删除。", ephemeral=True)
         
         self.qa_data[title] = content
         self.save_data()
         await ctx.respond(f"✅ 已添加条目：`{title}`", ephemeral=True)
+
+    @qa_group.command(name="修改", description="[管理] 修改已有条目的内容")
+    @is_qa_admin()
+    async def edit_entry(self, ctx, title: Option(str, "选择条目", autocomplete=search_qa_titles), new_content: str):
+        if title not in self.qa_data:
+            return await ctx.respond("❌ 未找到该条目。", ephemeral=True)
+        
+        self.qa_data[title] = new_content
+        self.save_data()
+        await ctx.respond(f"✅ 已更新条目：`{title}`", ephemeral=True)
 
     @qa_group.command(name="删除", description="[管理] 删除答疑条目")
     @is_qa_admin()
@@ -284,7 +278,6 @@ class QuickQA(commands.Cog):
     @is_qa_admin()
     async def export_data(self, ctx):
         md_content = self.export_data_to_markdown()
-        # 创建临时文件发送
         with open("qa_export.md", "w", encoding="utf-8") as f:
             f.write(md_content)
         
@@ -303,12 +296,12 @@ class QuickQA(commands.Cog):
             content_str = content_bytes.decode('utf-8')
             count = self.parse_markdown_to_data(content_str)
             self.save_data()
-            await ctx.respond(f"✅ 导入成功！共解析出 {count} 个条目。", ephemeral=True)
+            await ctx.respond(f"✅ 导入成功！共解析出 {count} 个主关键词。", ephemeral=True)
         except Exception as e:
             await ctx.respond(f"❌ 导入失败: {e}", ephemeral=True)
 
-    # 错误处理：权限不足
     @add_entry.error
+    @edit_entry.error
     @delete_entry.error
     @export_data.error
     @import_data.error
