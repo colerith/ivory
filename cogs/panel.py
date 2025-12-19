@@ -113,25 +113,22 @@ class AddQAModal(discord.ui.Modal):
             config["qa_list"].append({"q": self.children[0].value, "a": self.children[1].value})
             db.set_config(self.channel_id_str, config)
             await interaction.response.send_message(f"✅ 已添加", ephemeral=True)
-            # 这里的刷新不需要延迟，因为是用户主动操作
             await self.cog_ref.run_refresh_logic(interaction.channel)
 
 # ================= Cog =================
 class SelfPanel(discord.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # 存储正在等待刷新的任务：{channel_id: asyncio.Task}
         self.scheduled_tasks = {}
-        # 互斥锁：防止同一频道真正执行刷新时的冲突
         self.refresh_locks = {}
 
     async def run_refresh_logic(self, channel: discord.TextChannel):
         """
         真正的刷新逻辑（执行删除和重发）
+        【修改重点】：只删除被识别为“面板”的消息
         """
         cid = channel.id
         
-        # 简单并发锁
         if self.refresh_locks.get(cid, False):
             return
         self.refresh_locks[cid] = True
@@ -140,12 +137,36 @@ class SelfPanel(discord.Cog):
             config = db.get_config(cid)
             if not config: return
 
-            # 1. 扫荡旧消息 (只删除 Bot 发的面板消息)
+            # 1. 精准扫荡旧消息
             try:
-                # 获取最近30条，找到旧面板删掉
                 messages_to_delete = []
+                # 扫描最近30条
                 async for message in channel.history(limit=30):
-                    if message.author.id == self.bot.user.id:
+                    # 必须是机器人自己发的
+                    if message.author.id != self.bot.user.id:
+                        continue
+                    
+                    is_panel_message = False
+
+                    # 【判断条件 A】: Embed 标题匹配
+                    # 如果消息有 Embed，且标题和当前配置的面板标题一样，判定为旧面板
+                    if message.embeds and message.embeds[0].title == config["title"]:
+                        is_panel_message = True
+
+                    # 【判断条件 B】: 按钮组件匹配 (更稳健)
+                    # 检查消息里是否有 custom_id="ivory_qa_btn" 的按钮
+                    # 只有面板有这个按钮，QA回复是没按钮的
+                    if not is_panel_message and message.components:
+                        for component in message.components:
+                            if isinstance(component, discord.ActionRow):
+                                for child in component.children:
+                                    if hasattr(child, "custom_id") and child.custom_id == "ivory_qa_btn":
+                                        is_panel_message = True
+                                        break
+                            if is_panel_message: break
+                    
+                    # 只有被判定为面板消息，才加入删除列表
+                    if is_panel_message:
                         messages_to_delete.append(message)
                 
                 if messages_to_delete:
@@ -153,9 +174,9 @@ class SelfPanel(discord.Cog):
                         await messages_to_delete[0].delete()
                     else:
                         await channel.delete_messages(messages_to_delete)
+            
             except Exception as e:
-                # 容错：如果批量删除失败，不阻断后续发送
-                print(f"删除旧面板失败(可能是权限或消息太旧): {e}")
+                print(f"清理旧面板异常: {e}")
 
             # 2. 发送新面板
             embed = discord.Embed(
@@ -170,47 +191,29 @@ class SelfPanel(discord.Cog):
             self.refresh_locks[cid] = False
 
     async def schedule_refresh(self, channel: discord.TextChannel):
-        """
-        智能调度器：实现“防抖”
-        当有消息时，不会立即刷新，而是等待5秒。
-        如果5秒内又有新消息，重置等待时间。
-        """
         cid = channel.id
-
-        # 1. 如果该频道已经有一个等待中的刷新任务，取消它
         if cid in self.scheduled_tasks:
             task = self.scheduled_tasks[cid]
             if not task.done():
                 task.cancel()
         
-        # 2. 创建一个新的等待任务
         async def wait_and_run():
             try:
-                # 等待 4 秒 (这个时间可以根据需要调整，4秒足够一般的清理脚本跑完一波)
                 await asyncio.sleep(4)
-                # 真正执行刷新
                 await self.run_refresh_logic(channel)
             except asyncio.CancelledError:
-                # 如果被取消了（意味着又有新消息来了），什么都不做
                 pass
             finally:
-                # 清理任务记录
                 if cid in self.scheduled_tasks and self.scheduled_tasks[cid] == asyncio.current_task():
                     del self.scheduled_tasks[cid]
 
-        # 3. 启动任务并存入字典
         self.scheduled_tasks[cid] = asyncio.create_task(wait_and_run())
 
-    # --- 监听用户消息 ---
     @commands.Cog.listener()
     async def on_message(self, message):
-        # 排除机器人自己，避免死循环
         if message.author.id == self.bot.user.id:
             return
-        
-        # 检查是否是授权频道
         if db.is_authorized(message.channel.id):
-            # 只要有人说话（或者有系统消息），就触发防抖刷新
             await self.schedule_refresh(message.channel)
 
     # --- 命令组 ---
@@ -239,7 +242,6 @@ class SelfPanel(discord.Cog):
         perm, msg = self.check_perm(ctx)
         if not perm: return await ctx.respond(msg, ephemeral=True)
         await ctx.respond("🔄 正在刷新...", ephemeral=True)
-        # 手动指令立即执行，不延迟
         await self.run_refresh_logic(ctx.channel)
 
     @panel_group.command(name="新增答疑", description="向面板添加自助问答")
