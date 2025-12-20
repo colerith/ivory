@@ -16,7 +16,7 @@ class RoleMigration(commands.Cog):
 
     migration_group = SlashCommandGroup("身份组管理", "批量操作身份组")
 
-    @migration_group.command(name="迁移", description="[管理员] 将源身份组的人员批量赋予目标身份组")
+    @migration_group.command(name="迁移", description="[管理员] 极速迁移：将源身份组的人员批量赋予目标身份组")
     @is_admin()
     async def migrate_roles(
         self, 
@@ -108,7 +108,7 @@ class RoleMigration(commands.Cog):
                         await msg.edit_original_response(embed=new_embed)
                         last_percent = percent
                     except:
-                        pass
+                        pass # 忽略 UI 更新错误
 
         ui_task = asyncio.create_task(update_ui_loop())
 
