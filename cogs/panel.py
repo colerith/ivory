@@ -9,7 +9,6 @@ import re
 DATA_FILE = "data.json"
 SUPER_ADMIN_ID = 1353777207042113576
 
-# 默认模板
 DEFAULT_TEMPLATE = {
     "manager_id": 0,
     "color": 0xffc0cb,
@@ -18,7 +17,8 @@ DEFAULT_TEMPLATE = {
     "version": "未知",
     "welcome": "> 欢迎使用自助答疑系统\n\n贴主可使用命令自行配置\n\n请点击下方按钮开始使用。",
     "downloads": "## ⬇️下载直达\n暂无链接",
-    "qa_list": [] 
+    "qa_list": [],
+    "sub_role_ids": []
 }
 
 class DataManager:
@@ -41,7 +41,11 @@ class DataManager:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
 
     def get_config(self, channel_id):
-        return self.data["channels"].get(str(channel_id))
+        # 兼容旧数据：如果读取时没有 sub_role_ids，返回空列表
+        config = self.data["channels"].get(str(channel_id))
+        if config and "sub_role_ids" not in config:
+            config["sub_role_ids"] = []
+        return config
 
     def set_config(self, channel_id, config):
         self.data["channels"][str(channel_id)] = config
@@ -52,20 +56,55 @@ class DataManager:
 
 db = DataManager()
 
-# ================= UI Views (显示相关) =================
+# ================= UI Views =================
 class MainPanelView(discord.ui.View):
     def __init__(self, channel_id_str):
         super().__init__(timeout=None)
         self.channel_id_str = channel_id_str
 
-    @discord.ui.button(label="🗳️ 自助答疑", style=discord.ButtonStyle.primary, custom_id="ivory_qa_btn")
-    async def callback(self, button, interaction: discord.Interaction):
+    # 1. 自助答疑按钮
+    @discord.ui.button(label="🗳️ 自助答疑", style=discord.ButtonStyle.primary, custom_id="ivory_qa_btn", row=0)
+    async def qa_callback(self, button, interaction: discord.Interaction):
         view = QADropdownView(str(interaction.channel_id))
         config = db.get_config(str(interaction.channel_id))
         if not config or not config["qa_list"]:
              await interaction.response.send_message("暂无自助答疑内容。", ephemeral=True)
              return
         await interaction.response.send_message("请选择您遇到的问题：", view=view, ephemeral=True)
+
+    # 2. 新增：订阅更新按钮
+    @discord.ui.button(label="🔔 订阅更新", style=discord.ButtonStyle.success, custom_id="ivory_sub_btn", row=0)
+    async def sub_callback(self, button, interaction: discord.Interaction):
+        config = db.get_config(str(interaction.channel_id))
+        if not config: return
+
+        role_ids = config.get("sub_role_ids", [])
+        if not role_ids:
+            return await interaction.response.send_message("⚠️ 本频道尚未配置订阅身份组，请联系负责人设置。", ephemeral=True)
+
+        guild = interaction.guild
+        member = interaction.user
+        
+        added_roles = []
+        already_has = True
+
+        for rid in role_ids:
+            role = guild.get_role(rid)
+            if role:
+                if role not in member.roles:
+                    try:
+                        await member.add_roles(role, reason="自助面板订阅")
+                        added_roles.append(role.name)
+                        already_has = False
+                    except discord.Forbidden:
+                        return await interaction.response.send_message(f"❌ 无法分配身份组 `{role.name}`，Bot 权限不足。", ephemeral=True)
+        
+        if already_has:
+            # 如果配置的所有身份组用户都有了
+            await interaction.response.send_message("✅ 您已经订阅过了（已拥有所有相关身份组）。", ephemeral=True)
+        else:
+            roles_str = "`, `".join(added_roles)
+            await interaction.response.send_message(f"✅ 订阅成功！已为您添加：`{roles_str}`", ephemeral=True)
 
 class QADropdownView(discord.ui.View):
     def __init__(self, channel_id_str):
@@ -98,9 +137,28 @@ class QASelect(discord.ui.Select):
         else:
             await interaction.response.send_message("未找到该内容。", ephemeral=True)
 
-# ================= Modals (弹窗表单) =================
+# ================= Modals & Select Views =================
 
-# 1. 新增答疑
+# 设置订阅身份组的选择器视图
+class ConfigSubRoleView(discord.ui.View):
+    def __init__(self, channel_id_str):
+        super().__init__(timeout=60)
+        self.channel_id_str = channel_id_str
+    
+    @discord.ui.role_select(placeholder="选择点击按钮后要分配的身份组（可多选）", min_values=0, max_values=5)
+    async def callback(self, select, interaction: discord.Interaction):
+        roles = select.values # 这是一个 Role 对象列表
+        role_ids = [r.id for r in roles]
+        
+        config = db.get_config(self.channel_id_str)
+        if config:
+            config["sub_role_ids"] = role_ids
+            db.set_config(self.channel_id_str, config)
+            
+            names = [r.name for r in roles]
+            msg = f"✅ 已设置订阅身份组：`{', '.join(names)}`" if names else "✅ 已清空订阅身份组。"
+            await interaction.response.send_message(msg, ephemeral=True)
+
 class AddQAModal(discord.ui.Modal):
     def __init__(self, channel_id_str, cog_ref):
         super().__init__(title="新增自助答疑")
@@ -117,17 +175,14 @@ class AddQAModal(discord.ui.Modal):
             await interaction.response.send_message(f"✅ 已添加", ephemeral=True)
             await self.cog_ref.run_refresh_logic(interaction.channel)
 
-# 2. 修改外观 (标题、作者、颜色) - 【加回来的功能】
 class EditProfileModal(discord.ui.Modal):
     def __init__(self, config, cog_ref):
         super().__init__(title="编辑面板外观")
-        self.channel_id_str = str(config.get("channel_id", 0)) # 获取传入的ID
+        self.channel_id_str = str(config.get("channel_id", 0)) 
         self.cog_ref = cog_ref
-        
         self.add_item(discord.ui.InputText(label="标题", value=config["title"]))
         self.add_item(discord.ui.InputText(label="作者名", value=config["author"]))
         self.add_item(discord.ui.InputText(label="版本号", value=config["version"]))
-        
         hex_color = "#{:06x}".format(config["color"])
         self.add_item(discord.ui.InputText(label="颜色 (Hex格式)", value=hex_color, min_length=7, max_length=7))
 
@@ -137,19 +192,15 @@ class EditProfileModal(discord.ui.Modal):
             config["title"] = self.children[0].value
             config["author"] = self.children[1].value
             config["version"] = self.children[2].value
-            
-            # 颜色处理
             try:
                 color_int = int(self.children[3].value.replace("#", ""), 16)
             except:
                 color_int = 0xffc0cb
             config["color"] = color_int
-            
             db.set_config(str(interaction.channel.id), config)
             await interaction.response.send_message("✅ 外观信息已更新。", ephemeral=True)
             await self.cog_ref.run_refresh_logic(interaction.channel)
 
-# 3. 修改正文 (欢迎语、下载链接) - 【加回来的功能】
 class EditContentModal(discord.ui.Modal):
     def __init__(self, config, cog_ref):
         super().__init__(title="编辑面板正文")
@@ -162,12 +213,10 @@ class EditContentModal(discord.ui.Modal):
         if config:
             config["welcome"] = self.children[0].value
             config["downloads"] = self.children[1].value
-            
             db.set_config(str(interaction.channel.id), config)
             await interaction.response.send_message("✅ 正文内容已更新。", ephemeral=True)
             await self.cog_ref.run_refresh_logic(interaction.channel)
 
-# 4. 删除答疑选择器 - 【加回来的功能】
 class DeleteQAView(discord.ui.View):
     def __init__(self, channel_id_str, cog_ref):
         super().__init__(timeout=60)
@@ -179,18 +228,15 @@ class DeleteQASelect(discord.ui.Select):
         self.cog_ref = cog_ref
         config = db.get_config(channel_id_str)
         qa_list = config["qa_list"] if config else []
-        
         options = []
         for idx, item in enumerate(qa_list[:25]):
             label = item["q"][:95]
             options.append(discord.SelectOption(label=label, value=str(idx), emoji="🗑️"))
-        
         super().__init__(placeholder="选择要删除的问题...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         idx = int(self.values[0])
         config = db.get_config(self.channel_id_str)
-        
         if config and 0 <= idx < len(config["qa_list"]):
             removed = config["qa_list"].pop(idx)
             db.set_config(self.channel_id_str, config)
@@ -209,12 +255,10 @@ class SelfPanel(discord.Cog):
     async def run_refresh_logic(self, channel: discord.TextChannel):
         """
         真正的刷新逻辑（执行删除和重发）
-        【精准清理】：只删除标题匹配或含特定按钮的旧面板，防止误删 QA 面板
+        【精准清理】：只删除标题匹配或含特定按钮的旧面板
         """
         cid = channel.id
-        
-        if self.refresh_locks.get(cid, False):
-            return
+        if self.refresh_locks.get(cid, False): return
         self.refresh_locks[cid] = True
 
         try:
@@ -225,21 +269,19 @@ class SelfPanel(discord.Cog):
             try:
                 messages_to_delete = []
                 async for message in channel.history(limit=30):
-                    if message.author.id != self.bot.user.id:
-                        continue
-                    
+                    if message.author.id != self.bot.user.id: continue
                     is_panel_message = False
-
+                    
                     # 特征A: 标题匹配
                     if message.embeds and message.embeds[0].title == config["title"]:
                         is_panel_message = True
-
-                    # 特征B: 按钮 ID 匹配
+                    
+                    # 特征B: 按钮 ID 匹配 (ivory_qa_btn 或 ivory_sub_btn)
                     if not is_panel_message and message.components:
                         for component in message.components:
                             if isinstance(component, discord.ActionRow):
                                 for child in component.children:
-                                    if hasattr(child, "custom_id") and child.custom_id == "ivory_qa_btn":
+                                    if hasattr(child, "custom_id") and child.custom_id in ["ivory_qa_btn", "ivory_sub_btn"]:
                                         is_panel_message = True
                                         break
                             if is_panel_message: break
@@ -268,35 +310,29 @@ class SelfPanel(discord.Cog):
             self.refresh_locks[cid] = False
 
     async def schedule_refresh(self, channel: discord.TextChannel):
-        """智能调度器：实现防抖"""
         cid = channel.id
         if cid in self.scheduled_tasks:
             task = self.scheduled_tasks[cid]
-            if not task.done():
-                task.cancel()
+            if not task.done(): task.cancel()
         
         async def wait_and_run():
             try:
                 await asyncio.sleep(4)
                 await self.run_refresh_logic(channel)
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError: pass
             finally:
                 if cid in self.scheduled_tasks and self.scheduled_tasks[cid] == asyncio.current_task():
                     del self.scheduled_tasks[cid]
-
         self.scheduled_tasks[cid] = asyncio.create_task(wait_and_run())
 
-    # --- 监听用户消息 ---
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.id == self.bot.user.id:
-            return
+        if message.author.id == self.bot.user.id: return
         if db.is_authorized(message.channel.id):
             await self.schedule_refresh(message.channel)
 
     # --- 命令组 ---
-    panel_group = SlashCommandGroup("自助面板", "[贴主]管理预设常驻答疑面板")
+    panel_group = SlashCommandGroup("自助面板", "原有的小餐车面板管理")
 
     def check_perm(self, ctx):
         cid = str(ctx.channel.id)
@@ -310,7 +346,6 @@ class SelfPanel(discord.Cog):
     async def auth_channel(self, ctx, manager: discord.User):
         if ctx.author.id != SUPER_ADMIN_ID:
             return await ctx.respond("❌ 仅超级管理员可用", ephemeral=True)
-        
         new_config = DEFAULT_TEMPLATE.copy()
         new_config["manager_id"] = manager.id
         db.set_config(ctx.channel.id, new_config)
@@ -333,29 +368,33 @@ class SelfPanel(discord.Cog):
     async def delete_qa(self, ctx):
         perm, msg = self.check_perm(ctx)
         if not perm: return await ctx.respond(msg, ephemeral=True)
-        
         config = db.get_config(ctx.channel.id)
         if not config or not config["qa_list"]:
             return await ctx.respond("暂无 QA 内容。", ephemeral=True)
-
         await ctx.respond("请选择要删除的问题：", view=DeleteQAView(str(ctx.channel.id), self), ephemeral=True)
 
     @panel_group.command(name="修改外观", description="修改标题、作者、版本、颜色")
     async def edit_profile(self, ctx):
         perm, msg = self.check_perm(ctx)
         if not perm: return await ctx.respond(msg, ephemeral=True)
-        
         config = db.get_config(ctx.channel.id)
-        # 传递 cog_ref 以便刷新
         await ctx.send_modal(EditProfileModal(config, self))
 
     @panel_group.command(name="修改内容", description="修改欢迎语和下载链接")
     async def edit_content(self, ctx):
         perm, msg = self.check_perm(ctx)
         if not perm: return await ctx.respond(msg, ephemeral=True)
-        
         config = db.get_config(ctx.channel.id)
         await ctx.send_modal(EditContentModal(config, self))
+
+    @panel_group.command(name="设置订阅", description="配置点击“订阅更新”按钮时分配的身份组")
+    async def config_sub_roles(self, ctx):
+        perm, msg = self.check_perm(ctx)
+        if not perm: return await ctx.respond(msg, ephemeral=True)
+        
+        # 发送下拉选择器
+        view = ConfigSubRoleView(str(ctx.channel.id))
+        await ctx.respond("请选择该频道的订阅身份组（可多选）：", view=view, ephemeral=True)
 
 def setup(bot):
     bot.add_cog(SelfPanel(bot))
