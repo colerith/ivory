@@ -109,6 +109,57 @@ https://discord.com/channels/1291925535324110879/1429039503808659517
   - [电脑部署cli反代 旅程Wiki](https://wiki.opizontas.org/books/api/page/cli)
 """
 
+# ================= 辅助 UI 组件 =================
+
+# 1. 右键菜单触发的搜索弹窗
+class QASearchModal(discord.ui.Modal):
+    def __init__(self, cog, target_message):
+        super().__init__(title="快速答疑 - 搜索")
+        self.cog = cog
+        self.target_message = target_message
+        self.add_item(discord.ui.InputText(label="请输入关键词", placeholder="例如: 报错, chathistory..."))
+
+    async def callback(self, interaction: discord.Interaction):
+        query = self.children[0].value.strip()
+        keys = list(self.cog.qa_data.keys())
+        
+        # 1. 精确匹配
+        if query in keys:
+            await self.cog.send_qa_reply(interaction, self.target_message, query)
+            return
+
+        # 2. 模糊匹配
+        matches = [k for k in keys if query.lower() in k.lower()]
+        
+        if len(matches) == 0:
+            await interaction.response.send_message(f"❌ 未找到包含 `{query}` 的答疑内容。", ephemeral=True)
+        elif len(matches) == 1:
+            # 只有一个模糊匹配，直接发送
+            await self.cog.send_qa_reply(interaction, self.target_message, matches[0])
+        else:
+            # 多个匹配，让用户选择
+            view = QASelectView(self.cog, self.target_message, matches[:25])
+            await interaction.response.send_message(f"🔍 找到多个相关内容，请选择：", view=view, ephemeral=True)
+
+# 2. 模糊匹配的选择菜单
+class QASelectView(discord.ui.View):
+    def __init__(self, cog, target_message, matches):
+        super().__init__(timeout=60)
+        self.add_item(QASelect(cog, target_message, matches))
+
+class QASelect(discord.ui.Select):
+    def __init__(self, cog, target_message, matches):
+        options = [discord.SelectOption(label=m[:100]) for m in matches]
+        super().__init__(placeholder="选择要回复的内容...", min_values=1, max_values=1, options=options)
+        self.cog = cog
+        self.target_message = target_message
+
+    async def callback(self, interaction: discord.Interaction):
+        query = self.values[0]
+        await self.cog.send_qa_reply(interaction, self.target_message, query)
+
+# ================= 主逻辑 Cog =================
+
 class QuickQA(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -125,7 +176,6 @@ class QuickQA(commands.Cog):
                 print(f"⚠️ QA数据加载失败: {e}")
                 self.qa_data = {}
         
-        # 如果数据为空，加载默认数据
         if not self.qa_data:
             print("⏳ 初始化默认答疑库...")
             self.parse_markdown_to_data(INITIAL_MARKDOWN)
@@ -143,7 +193,6 @@ class QuickQA(commands.Cog):
 
         for line in lines:
             line = line.strip()
-            # 识别一级标题作为 Key
             if line.startswith("# "):
                 if current_title:
                     new_data[current_title] = "\n".join(current_content).strip()
@@ -175,8 +224,86 @@ class QuickQA(commands.Cog):
         filtered = [k for k in keys if user_input in k.lower()]
         return filtered[:25] 
 
-    # ================= 命令组 =================
-    qa_group = SlashCommandGroup("快速答疑", "[管理]通过答疑库快捷答疑")
+    # ================= 核心功能：生成回复 Payload =================
+    def get_qa_payload(self, query, user):
+        """
+        生成统一的回复内容 (文字 + Embeds)
+        供斜杠命令和右键菜单共用
+        """
+        content = self.qa_data[query]
+        
+        # 1. 提取所有图片链接
+        images = re.findall(r'(https?://.*?\.(?:png|jpg|jpeg|gif|webp))', content, re.IGNORECASE)
+        
+        # 2. 清洗正文中的链接
+        clean_text = content
+        clean_text = re.sub(r'!\[.*?\]\(https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?\)', '', clean_text, flags=re.IGNORECASE)
+        for img in images:
+            clean_text = clean_text.replace(img, "")
+        
+        clean_text = clean_text.strip()
+        if not clean_text:
+            clean_text = "（请查看下方图片详情）"
+
+        # 3. 构建多 Embed
+        embeds = []
+        
+        # 主 Embed
+        main_embed = discord.Embed(
+            title=f"💡 关于 {query}",
+            description=f"{user.mention}\n\n{clean_text}",
+            color=0x00ff00
+        )
+        
+        if images:
+            main_embed.set_image(url=images[0])
+            embeds.append(main_embed)
+            for img_url in images[1:4]:
+                sub_embed = discord.Embed(url="https://discord.com", color=0x00ff00)
+                sub_embed.set_image(url=img_url)
+                embeds.append(sub_embed)
+        else:
+            embeds.append(main_embed)
+
+        return f"{user.mention} 看这里 👇", embeds
+
+    # ================= 核心功能：右键菜单处理逻辑 =================
+    
+    async def send_qa_reply(self, interaction, target_message, query):
+        """
+        处理右键菜单的最终发送：引用(Reply)目标消息
+        """
+        msg_content, embeds = self.get_qa_payload(query, target_message.author)
+        
+        try:
+            # 1. 对目标消息进行引用回复 (Reply)
+            await target_message.reply(content=msg_content, embeds=embeds, mention_author=True)
+            
+            # 2. 告诉操作者发送成功 (Ephemeral)
+            # 如果 interaction 还没回复过，用 response；如果刚才 defer 过或回复过，用 followup
+            if not interaction.response.is_done():
+                await interaction.response.send_message("✅ 已成功回复该用户！", ephemeral=True)
+            else:
+                await interaction.followup.send("✅ 已成功回复该用户！", ephemeral=True)
+                
+        except discord.Forbidden:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ 无法回复该消息（可能我没有权限或被拉黑）。", ephemeral=True)
+        except Exception as e:
+            print(f"Reply Error: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ 发送失败: {e}", ephemeral=True)
+
+    # ================= 命令注册 =================
+
+    # 1. 右键菜单 (Message Command)
+    @commands.message_command(name="快速答疑")
+    async def quick_qa_context(self, ctx, message: discord.Message):
+        # 弹出模态框让用户输入关键词
+        await ctx.send_modal(QASearchModal(self, message))
+
+    # 2. 斜杠命令组
+    qa_group = SlashCommandGroup("快速答疑", "答疑库相关操作")
 
     @qa_group.command(name="回复", description="选择答疑库内容回复指定用户")
     async def reply_user(
@@ -188,53 +315,11 @@ class QuickQA(commands.Cog):
         if query not in self.qa_data:
             return await ctx.respond(f"❌ 未找到关键词 `{query}`，请检查拼写。", ephemeral=True)
 
-        content = self.qa_data[query]
+        # 使用封装好的 helper 生成内容
+        msg_content, embeds = self.get_qa_payload(query, user)
         
-        # 1. 提取所有图片链接
-        # 匹配 http/https 开头的图片格式
-        images = re.findall(r'(https?://.*?\.(?:png|jpg|jpeg|gif|webp))', content, re.IGNORECASE)
-        
-        # 2. 清洗正文中的链接，使其不显示
-        clean_text = content
-        # 先去除 Markdown 图片语法 ![xxx](url)
-        clean_text = re.sub(r'!\[.*?\]\(https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?\)', '', clean_text, flags=re.IGNORECASE)
-        # 再去除裸露的图片链接
-        for img in images:
-            clean_text = clean_text.replace(img, "")
-        
-        clean_text = clean_text.strip()
-        if not clean_text:
-            clean_text = "（请查看下方图片详情）"
-
-        # 3. 构建多 Embed
-        embeds = []
-        
-        # 主 Embed (放文字和第一张图)
-        main_embed = discord.Embed(
-            title=f"💡 关于 {query}",
-            description=f"{user.mention}\n\n{clean_text}",
-            color=0x00ff00
-        )
-        
-        if images:
-            # 第一张图给主 Embed
-            main_embed.set_image(url=images[0])
-            embeds.append(main_embed)
-            
-            # 剩余图片 (Discord 限制一次最多发 10 个 Embed，为了拼图好看通常再加 3 张凑 4 格)
-            # 我们这里取接下来的 3 张
-            for img_url in images[1:4]:
-                # 创建仅包含图片的子 Embed
-                sub_embed = discord.Embed(url="https://discord.com", color=0x00ff00)
-                sub_embed.set_image(url=img_url)
-                embeds.append(sub_embed)
-        else:
-            # 没图就只发主 Embed
-            embeds.append(main_embed)
-
-        # 4. 发送 Embed 列表
-        # 注意参数变成了 embeds (复数)
-        await ctx.respond(content=f"{user.mention} 看这里 👇", embeds=embeds)
+        # 斜杠命令直接发送（不引用消息，因为没有 specific message）
+        await ctx.respond(content=msg_content, embeds=embeds)
 
     # ================= 管理功能 =================
     def is_qa_admin():
@@ -317,4 +402,3 @@ class QuickQA(commands.Cog):
 
 def setup(bot):
     bot.add_cog(QuickQA(bot))
-
