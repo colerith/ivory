@@ -111,52 +111,44 @@ https://discord.com/channels/1291925535324110879/1429039503808659517
 
 # ================= 辅助 UI 组件 =================
 
-# 1. 右键菜单触发的搜索弹窗
-class QASearchModal(discord.ui.Modal):
+# 1. 右键菜单专用的选择视图 (替代了之前的 Modal 和 Search Modal)
+class RightClickSelectView(discord.ui.View):
     def __init__(self, cog, target_message):
-        super().__init__(title="快速答疑 - 搜索")
-        self.cog = cog
-        self.target_message = target_message
-        self.add_item(discord.ui.InputText(label="请输入关键词", placeholder="例如: 报错, chathistory..."))
-
-    async def callback(self, interaction: discord.Interaction):
-        query = self.children[0].value.strip()
-        keys = list(self.cog.qa_data.keys())
-        
-        # 1. 精确匹配
-        if query in keys:
-            await self.cog.send_qa_reply(interaction, self.target_message, query)
-            return
-
-        # 2. 模糊匹配
-        matches = [k for k in keys if query.lower() in k.lower()]
-        
-        if len(matches) == 0:
-            await interaction.response.send_message(f"❌ 未找到包含 `{query}` 的答疑内容。", ephemeral=True)
-        elif len(matches) == 1:
-            # 只有一个模糊匹配，直接发送
-            await self.cog.send_qa_reply(interaction, self.target_message, matches[0])
-        else:
-            # 多个匹配，让用户选择
-            view = QASelectView(self.cog, self.target_message, matches[:25])
-            await interaction.response.send_message(f"🔍 找到多个相关内容，请选择：", view=view, ephemeral=True)
-
-# 2. 模糊匹配的选择菜单
-class QASelectView(discord.ui.View):
-    def __init__(self, cog, target_message, matches):
         super().__init__(timeout=60)
-        self.add_item(QASelect(cog, target_message, matches))
+        self.add_item(RightClickSelect(cog, target_message))
 
-class QASelect(discord.ui.Select):
-    def __init__(self, cog, target_message, matches):
-        options = [discord.SelectOption(label=m[:100]) for m in matches]
-        super().__init__(placeholder="选择要回复的内容...", min_values=1, max_values=1, options=options)
+class RightClickSelect(discord.ui.Select):
+    def __init__(self, cog, target_message):
         self.cog = cog
         self.target_message = target_message
+        
+        # 获取所有 Key，并截取前25个 (Discord 限制下拉菜单最多25个选项)
+        # 如果需要更多，建议使用斜杠命令的搜索功能
+        keys = list(cog.qa_data.keys())
+        options = []
+        for k in keys[:25]:
+            # 截断过长的标题
+            label = k[:100]
+            options.append(discord.SelectOption(label=label, value=k))
+            
+        super().__init__(
+            placeholder="👇 请选择要回复的答疑内容...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
 
     async def callback(self, interaction: discord.Interaction):
+        # 这里的交互是用户选择下拉菜单后的回调
         query = self.values[0]
+        
+        # 1. 执行发送逻辑
         await self.cog.send_qa_reply(interaction, self.target_message, query)
+        
+        # 2. 发送成功后，为了界面整洁，可以把这个选择菜单删掉或禁用
+        # 这里选择编辑掉原来的 ephemeral 消息
+        await interaction.message.delete()
+
 
 # ================= 主逻辑 Cog =================
 
@@ -225,10 +217,9 @@ class QuickQA(commands.Cog):
         return filtered[:25] 
 
     # ================= 核心功能：生成回复 Payload =================
-    def get_qa_payload(self, query, user):
+    def get_qa_payload(self, query):
         """
-        生成统一的回复内容 (文字 + Embeds)
-        供斜杠命令和右键菜单共用
+        【修改】：不再接收 user 参数，Embed 描述中也不再包含 @User
         """
         content = self.qa_data[query]
         
@@ -248,10 +239,10 @@ class QuickQA(commands.Cog):
         # 3. 构建多 Embed
         embeds = []
         
-        # 主 Embed
+        # 主 Embed (注意：Description 去掉了 user.mention)
         main_embed = discord.Embed(
             title=f"💡 关于 {query}",
-            description=f"{user.mention}\n\n{clean_text}",
+            description=clean_text, 
             color=0x00ff00
         )
         
@@ -265,7 +256,7 @@ class QuickQA(commands.Cog):
         else:
             embeds.append(main_embed)
 
-        return f"{user.mention} 看这里 👇", embeds
+        return embeds
 
     # ================= 核心功能：右键菜单处理逻辑 =================
     
@@ -273,34 +264,39 @@ class QuickQA(commands.Cog):
         """
         处理右键菜单的最终发送：引用(Reply)目标消息
         """
-        msg_content, embeds = self.get_qa_payload(query, target_message.author)
+        # 获取 embeds (不带文字内容，因为 reply 自带引用)
+        embeds = self.get_qa_payload(query)
         
         try:
-            # 1. 对目标消息进行引用回复 (Reply)
-            await target_message.reply(content=msg_content, embeds=embeds, mention_author=True)
+            # 执行引用回复
+            # content=None (不发额外的文字)
+            # mention_author=True (确保原作者收到通知)
+            await target_message.reply(content=None, embeds=embeds, mention_author=True)
             
-            # 2. 告诉操作者发送成功 (Ephemeral)
-            # 如果 interaction 还没回复过，用 response；如果刚才 defer 过或回复过，用 followup
+            # 这里的 interaction 是下拉菜单的 interaction
             if not interaction.response.is_done():
-                await interaction.response.send_message("✅ 已成功回复该用户！", ephemeral=True)
+                await interaction.response.send_message("✅ 已成功回复！", ephemeral=True)
             else:
-                await interaction.followup.send("✅ 已成功回复该用户！", ephemeral=True)
+                await interaction.followup.send("✅ 已成功回复！", ephemeral=True)
                 
         except discord.Forbidden:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("❌ 无法回复该消息（可能我没有权限或被拉黑）。", ephemeral=True)
+            await interaction.response.send_message("❌ 无法回复该消息（可能权限不足）。", ephemeral=True)
         except Exception as e:
             print(f"Reply Error: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ 发送失败: {e}", ephemeral=True)
 
     # ================= 命令注册 =================
 
     # 1. 右键菜单 (Message Command)
     @commands.message_command(name="快速答疑")
     async def quick_qa_context(self, ctx, message: discord.Message):
-        # 弹出模态框让用户输入关键词
-        await ctx.send_modal(QASearchModal(self, message))
+        """
+        右键菜单入口：直接发送一个下拉菜单 (Ephemeral)
+        """
+        if not self.qa_data:
+            return await ctx.respond("❌ 答疑库为空，请先添加内容。", ephemeral=True)
+
+        view = RightClickSelectView(self, message)
+        await ctx.respond("请选择要回复的条目：", view=view, ephemeral=True)
 
     # 2. 斜杠命令组
     qa_group = SlashCommandGroup("快速答疑", "答疑库相关操作")
@@ -315,11 +311,11 @@ class QuickQA(commands.Cog):
         if query not in self.qa_data:
             return await ctx.respond(f"❌ 未找到关键词 `{query}`，请检查拼写。", ephemeral=True)
 
-        # 使用封装好的 helper 生成内容
-        msg_content, embeds = self.get_qa_payload(query, user)
+        embeds = self.get_qa_payload(query)
         
-        # 斜杠命令直接发送（不引用消息，因为没有 specific message）
-        await ctx.respond(content=msg_content, embeds=embeds)
+        # 斜杠命令需要手动 @ 用户，因为不是引用回复
+        # content=user.mention 用于通知，Embed 里保持干净
+        await ctx.respond(content=f"{user.mention} 👇", embeds=embeds)
 
     # ================= 管理功能 =================
     def is_qa_admin():
