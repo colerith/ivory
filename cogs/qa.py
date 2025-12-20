@@ -122,12 +122,10 @@ class RightClickSelect(discord.ui.Select):
         self.cog = cog
         self.target_message = target_message
         
-        # 获取所有 Key，并截取前25个 (Discord 限制下拉菜单最多25个选项)
-        # 如果需要更多，建议使用斜杠命令的搜索功能
+        # 获取所有 Key，并截取前25个
         keys = list(cog.qa_data.keys())
         options = []
         for k in keys[:25]:
-            # 截断过长的标题
             label = k[:100]
             options.append(discord.SelectOption(label=label, value=k))
             
@@ -139,15 +137,23 @@ class RightClickSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # 这里的交互是用户选择下拉菜单后的回调
+        # 1. 获取用户选择的关键词
         query = self.values[0]
         
-        # 1. 执行发送逻辑
-        await self.cog.send_qa_reply(interaction, self.target_message, query)
-        
-        # 2. 发送成功后，为了界面整洁，可以把这个选择菜单删掉或禁用
-        # 这里选择编辑掉原来的 ephemeral 消息
-        await interaction.message.delete()
+        try:
+            # 2. 获取回复内容 (Payload)
+            embeds = self.cog.get_qa_payload(query)
+            
+            # 3. 对目标消息进行引用回复 (公开)
+            await self.target_message.reply(content=None, embeds=embeds, mention_author=True)
+            await interaction.response.edit_message(content=f"✅ 已成功回复关于 **{query}** 的内容！", view=None)
+                
+        except discord.Forbidden:
+            await interaction.response.edit_message(content="❌ 无法回复该消息（可能我没有权限或被拉黑）。", view=None)
+        except Exception as e:
+            print(f"Reply Error: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(content=f"❌ 发送失败: {e}", view=None)
 
 
 # ================= 主逻辑 Cog =================
@@ -314,7 +320,6 @@ class QuickQA(commands.Cog):
         embeds = self.get_qa_payload(query)
         
         # 斜杠命令需要手动 @ 用户，因为不是引用回复
-        # content=user.mention 用于通知，Embed 里保持干净
         await ctx.respond(content=f"{user.mention} 👇", embeds=embeds)
 
     # ================= 管理功能 =================
