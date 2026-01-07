@@ -42,7 +42,7 @@ https://files.catbox.moe/ky692o.png
 
 # 自动解析
 ## 💡 MoM系预设自动解析设置
-推理-自动解析-（显示隐藏内容）-前缀“<thinking>”-后缀“</thinking>”-保存
+推理-自动解析-（显示隐藏内容）-前缀`<thinking>`-后缀`</thinking>`-保存
 
 **⚠️注意：【自动解析】仅在酒馆较新版本有，推荐确保你的酒馆升级至1.13版本以上**
 https://files.catbox.moe/831kl2.webp
@@ -101,9 +101,9 @@ https://files.catbox.moe/4uedrd.png
 https://discord.com/channels/1291925535324110879/1429039503808659517
 
 <a:number_2:1093887089730396230> 如果你使用的是2.5pro，可以使用api直连、build反代以及cli反代三种方法（build反代同上）：
-- AI studio api教程：
+### AI studio api教程：
   - [Google AI Studio教程 旅程Wiki](https://wiki.opizontas.org/books/api/page/google-ai-studio)
-- cli反代教程（需要把预设的top k参数设置在64以上）
+### cli反代教程（需要把预设的top k参数设置在64以上）
   - [安卓 | Termux ⟡ 酒馆 & ClewdR & gcli2api 一键脚本](https://discord.com/channels/1291925535324110879/1385183883540303872)
   - [安卓一键部署-gemini-cli-termux](https://discord.com/channels/1291925535324110879/1407120550467211264)
   - [电脑部署cli反代 旅程Wiki](https://wiki.opizontas.org/books/api/page/cli)
@@ -403,3 +403,4 @@ class QuickQA(commands.Cog):
 
 def setup(bot):
     bot.add_cog(QuickQA(bot))
+
