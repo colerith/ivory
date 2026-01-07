@@ -111,7 +111,7 @@ https://discord.com/channels/1291925535324110879/1429039503808659517
 
 # ================= 辅助 UI 组件 =================
 
-# 1. 右键菜单专用的选择视图 (替代了之前的 Modal 和 Search Modal)
+# 1. 右键菜单专用的选择视图
 class RightClickSelectView(discord.ui.View):
     def __init__(self, cog, target_message):
         super().__init__(timeout=60)
@@ -121,14 +121,11 @@ class RightClickSelect(discord.ui.Select):
     def __init__(self, cog, target_message):
         self.cog = cog
         self.target_message = target_message
-        
-        # 获取所有 Key，并截取前25个
         keys = list(cog.qa_data.keys())
         options = []
         for k in keys[:25]:
             label = k[:100]
             options.append(discord.SelectOption(label=label, value=k))
-            
         super().__init__(
             placeholder="👇 请选择要回复的答疑内容...",
             min_values=1,
@@ -137,23 +134,89 @@ class RightClickSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # 1. 获取用户选择的关键词
         query = self.values[0]
-        
         try:
-            # 2. 获取回复内容 (Payload)
             embeds = self.cog.get_qa_payload(query)
-            
-            # 3. 对目标消息进行引用回复 (公开)
             await self.target_message.reply(content=None, embeds=embeds, mention_author=True)
             await interaction.response.edit_message(content=f"✅ 已成功回复关于 **{query}** 的内容！", view=None)
-                
         except discord.Forbidden:
             await interaction.response.edit_message(content="❌ 无法回复该消息（可能我没有权限或被拉黑）。", view=None)
         except Exception as e:
-            print(f"Reply Error: {e}")
             if not interaction.response.is_done():
                 await interaction.response.edit_message(content=f"❌ 发送失败: {e}", view=None)
+
+# 2. 新增条目的 Modal (弹窗)
+class AddEntryModal(discord.ui.Modal):
+    def __init__(self, cog):
+        super().__init__(title="新增答疑条目")
+        self.cog = cog
+        
+        self.add_item(discord.ui.InputText(
+            label="标题 (关键词)", 
+            placeholder="例如：如何使用酒馆",
+            max_length=100
+        ))
+        
+        self.add_item(discord.ui.InputText(
+            label="内容 (支持Markdown)", 
+            placeholder="请输入详细的回答内容...",
+            style=discord.InputTextStyle.long,
+            max_length=3000
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        title = self.children[0].value.strip()
+        content = self.children[1].value.strip()
+        
+        if title in self.cog.qa_data:
+            return await interaction.response.send_message("❌ 该标题已存在，请使用【修改】功能。", ephemeral=True)
+            
+        self.cog.qa_data[title] = content
+        self.cog.save_data()
+        await interaction.response.send_message(f"✅ 已添加新条目：`{title}`", ephemeral=True)
+
+# 3. 修改条目的 Modal (弹窗 - 自动填充旧内容)
+class EditEntryModal(discord.ui.Modal):
+    def __init__(self, cog, old_title, old_content):
+        super().__init__(title="修改答疑条目")
+        self.cog = cog
+        self.original_title = old_title
+        
+        # 自动填入旧标题
+        self.add_item(discord.ui.InputText(
+            label="标题 (关键词)", 
+            value=old_title,
+            max_length=100
+        ))
+        
+        # 自动填入旧内容
+        self.add_item(discord.ui.InputText(
+            label="内容", 
+            value=old_content,
+            style=discord.InputTextStyle.long,
+            max_length=3000
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        new_title = self.children[0].value.strip()
+        new_content = self.children[1].value.strip()
+        
+        # 如果改了标题，需要判断新标题是否冲突
+        if new_title != self.original_title and new_title in self.cog.qa_data:
+             return await interaction.response.send_message("❌ 修改后的标题已存在其他条目中，修改失败。", ephemeral=True)
+        
+        # 如果改了标题，删除旧key
+        if new_title != self.original_title:
+            del self.cog.qa_data[self.original_title]
+            
+        self.cog.qa_data[new_title] = new_content
+        self.cog.save_data()
+        
+        msg = f"✅ 已更新条目：`{new_title}`"
+        if new_title != self.original_title:
+            msg += f" (原标题: {self.original_title})"
+            
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 # ================= 主逻辑 Cog =================
@@ -164,7 +227,6 @@ class QuickQA(commands.Cog):
         self.qa_data = {}
         self.load_data()
 
-    # ================= 数据处理 =================
     def load_data(self):
         if os.path.exists(QA_FILE):
             try:
@@ -222,36 +284,23 @@ class QuickQA(commands.Cog):
         filtered = [k for k in keys if user_input in k.lower()]
         return filtered[:25] 
 
-    # ================= 核心功能：生成回复 Payload =================
     def get_qa_payload(self, query):
-        """
-        【修改】：不再接收 user 参数，Embed 描述中也不再包含 @User
-        """
         content = self.qa_data[query]
-        
-        # 1. 提取所有图片链接
         images = re.findall(r'(https?://.*?\.(?:png|jpg|jpeg|gif|webp))', content, re.IGNORECASE)
-        
-        # 2. 清洗正文中的链接
         clean_text = content
         clean_text = re.sub(r'!\[.*?\]\(https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?\)', '', clean_text, flags=re.IGNORECASE)
         for img in images:
             clean_text = clean_text.replace(img, "")
-        
         clean_text = clean_text.strip()
         if not clean_text:
             clean_text = "（请查看下方图片详情）"
 
-        # 3. 构建多 Embed
         embeds = []
-        
-        # 主 Embed (注意：Description 去掉了 user.mention)
         main_embed = discord.Embed(
             title=f"💡 关于 {query}",
             description=clean_text, 
             color=0x00ff00
         )
-        
         if images:
             main_embed.set_image(url=images[0])
             embeds.append(main_embed)
@@ -264,47 +313,15 @@ class QuickQA(commands.Cog):
 
         return embeds
 
-    # ================= 核心功能：右键菜单处理逻辑 =================
-    
-    async def send_qa_reply(self, interaction, target_message, query):
-        """
-        处理右键菜单的最终发送：引用(Reply)目标消息
-        """
-        # 获取 embeds (不带文字内容，因为 reply 自带引用)
-        embeds = self.get_qa_payload(query)
-        
-        try:
-            # 执行引用回复
-            # content=None (不发额外的文字)
-            # mention_author=True (确保原作者收到通知)
-            await target_message.reply(content=None, embeds=embeds, mention_author=True)
-            
-            # 这里的 interaction 是下拉菜单的 interaction
-            if not interaction.response.is_done():
-                await interaction.response.send_message("✅ 已成功回复！", ephemeral=True)
-            else:
-                await interaction.followup.send("✅ 已成功回复！", ephemeral=True)
-                
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ 无法回复该消息（可能权限不足）。", ephemeral=True)
-        except Exception as e:
-            print(f"Reply Error: {e}")
-
     # ================= 命令注册 =================
 
-    # 1. 右键菜单 (Message Command)
     @commands.message_command(name="快速答疑")
     async def quick_qa_context(self, ctx, message: discord.Message):
-        """
-        右键菜单入口：直接发送一个下拉菜单 (Ephemeral)
-        """
         if not self.qa_data:
             return await ctx.respond("❌ 答疑库为空，请先添加内容。", ephemeral=True)
-
         view = RightClickSelectView(self, message)
         await ctx.respond("请选择要回复的条目：", view=view, ephemeral=True)
 
-    # 2. 斜杠命令组
     qa_group = SlashCommandGroup("快速答疑", "答疑库相关操作")
 
     @qa_group.command(name="回复", description="选择答疑库内容回复指定用户")
@@ -316,10 +333,7 @@ class QuickQA(commands.Cog):
     ):
         if query not in self.qa_data:
             return await ctx.respond(f"❌ 未找到关键词 `{query}`，请检查拼写。", ephemeral=True)
-
         embeds = self.get_qa_payload(query)
-        
-        # 斜杠命令需要手动 @ 用户，因为不是引用回复
         await ctx.respond(content=f"{user.mention} 👇", embeds=embeds)
 
     # ================= 管理功能 =================
@@ -329,23 +343,28 @@ class QuickQA(commands.Cog):
             return role is not None
         return commands.check(predicate)
 
-    @qa_group.command(name="新增", description="[管理] 添加新的答疑条目")
+    # 升级点 1: 新增改为弹出 Modal
+    @qa_group.command(name="新增", description="[管理] 弹出窗口添加新的答疑条目")
     @is_qa_admin()
-    async def add_entry(self, ctx, title: str, content: str):
-        if title in self.qa_data:
-            return await ctx.respond("❌ 该标题已存在，请使用修改或先删除。", ephemeral=True)
-        self.qa_data[title] = content
-        self.save_data()
-        await ctx.respond(f"✅ 已添加条目：`{title}`", ephemeral=True)
+    async def add_entry(self, ctx):
+        # 直接弹出模态框
+        modal = AddEntryModal(self)
+        await ctx.send_modal(modal)
 
-    @qa_group.command(name="修改", description="[管理] 修改已有条目的内容")
+    # 升级点 2: 修改改为弹出 Modal 并自动抓取旧内容
+    @qa_group.command(name="修改", description="[管理] 弹出窗口修改已有条目")
     @is_qa_admin()
-    async def edit_entry(self, ctx, title: Option(str, "选择条目", autocomplete=search_qa_titles), new_content: str):
+    async def edit_entry(self, ctx, title: Option(str, "选择要修改的条目", autocomplete=search_qa_titles)):
+        # 1. 检查是否存在
         if title not in self.qa_data:
             return await ctx.respond("❌ 未找到该条目。", ephemeral=True)
-        self.qa_data[title] = new_content
-        self.save_data()
-        await ctx.respond(f"✅ 已更新条目：`{title}`", ephemeral=True)
+        
+        # 2. 抓取旧内容
+        old_content = self.qa_data[title]
+        
+        # 3. 传入 Modal 并显示
+        modal = EditEntryModal(self, title, old_content)
+        await ctx.send_modal(modal)
 
     @qa_group.command(name="删除", description="[管理] 删除答疑条目")
     @is_qa_admin()
