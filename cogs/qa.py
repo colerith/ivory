@@ -336,9 +336,14 @@ class QuickQA(commands.Cog):
         embeds = self.get_qa_payload(query)
         await ctx.respond(content=f"{user.mention} 👇", embeds=embeds)
 
-    # ================= 管理功能 =================
+   # ================= 管理功能 =================
     def is_qa_admin():
         def predicate(ctx):
+            # 1. 先检查是否是服务器管理员 (拥有 Administrator 权限)
+            if ctx.author.guild_permissions.administrator:
+                return True
+            
+            # 2. 如果不是管理员，再检查是否有指定的身份组ID
             role = discord.utils.get(ctx.author.roles, id=ADMIN_ROLE_ID)
             return role is not None
         return commands.check(predicate)
