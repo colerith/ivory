@@ -41,7 +41,6 @@ class DataManager:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
 
     def get_config(self, channel_id):
-        # 兼容旧数据：如果读取时没有 sub_role_ids，返回空列表
         config = self.data["channels"].get(str(channel_id))
         if config and "sub_role_ids" not in config:
             config["sub_role_ids"] = []
@@ -56,13 +55,12 @@ class DataManager:
 
 db = DataManager()
 
-# ================= UI Views =================
+# ================= UI Views (主面板与展示) =================
 class MainPanelView(discord.ui.View):
     def __init__(self, channel_id_str):
         super().__init__(timeout=None)
         self.channel_id_str = channel_id_str
 
-    # 1. 自助答疑按钮
     @discord.ui.button(label="🗳️ 自助答疑", style=discord.ButtonStyle.primary, custom_id="ivory_qa_btn", row=0)
     async def qa_callback(self, button, interaction: discord.Interaction):
         view = QADropdownView(str(interaction.channel_id))
@@ -72,7 +70,6 @@ class MainPanelView(discord.ui.View):
              return
         await interaction.response.send_message("请选择您遇到的问题：", view=view, ephemeral=True)
 
-    # 2. 新增：订阅更新按钮
     @discord.ui.button(label="🔔 订阅更新", style=discord.ButtonStyle.success, custom_id="ivory_sub_btn", row=0)
     async def sub_callback(self, button, interaction: discord.Interaction):
         config = db.get_config(str(interaction.channel_id))
@@ -100,7 +97,6 @@ class MainPanelView(discord.ui.View):
                         return await interaction.response.send_message(f"❌ 无法分配身份组 `{role.name}`，Bot 权限不足。", ephemeral=True)
         
         if already_has:
-            # 如果配置的所有身份组用户都有了
             await interaction.response.send_message("✅ 您已经订阅过了（已拥有所有相关身份组）。", ephemeral=True)
         else:
             roles_str = "`, `".join(added_roles)
@@ -137,9 +133,90 @@ class QASelect(discord.ui.Select):
         else:
             await interaction.response.send_message("未找到该内容。", ephemeral=True)
 
-# ================= Modals & Select Views =================
+# ================= 新增功能核心：修改答疑组件 =================
 
-# 设置订阅身份组的选择器视图
+# 1. 修改答疑的选择视图
+class EditQAView(discord.ui.View):
+    def __init__(self, channel_id_str, cog_ref):
+        super().__init__(timeout=60)
+        self.add_item(EditQASelect(channel_id_str, cog_ref))
+
+# 2. 修改答疑的选择下拉菜单
+class EditQASelect(discord.ui.Select):
+    def __init__(self, channel_id_str, cog_ref):
+        self.channel_id_str = channel_id_str
+        self.cog_ref = cog_ref
+        
+        config = db.get_config(channel_id_str)
+        qa_list = config["qa_list"] if config else []
+        
+        options = []
+        # 列出所有问题供选择
+        for idx, item in enumerate(qa_list[:25]):
+            label = item["q"][:95]
+            options.append(discord.SelectOption(label=label, value=str(idx), emoji="📝"))
+            
+        super().__init__(
+            placeholder="👇 请选择要修改的答疑...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        idx = int(self.values[0])
+        config = db.get_config(self.channel_id_str)
+        
+        if config and 0 <= idx < len(config["qa_list"]):
+            item = config["qa_list"][idx]
+            # 选中后，直接弹出 Modal，并把旧的 q 和 a 传进去
+            modal = EditQAModal(self.channel_id_str, self.cog_ref, idx, item["q"], item["a"])
+            await interaction.response.send_modal(modal)
+        else:
+            await interaction.response.send_message("❌ 该条目似乎已被删除。", ephemeral=True)
+
+# 3. 修改答疑的 Modal (带自动填充)
+class EditQAModal(discord.ui.Modal):
+    def __init__(self, channel_id_str, cog_ref, idx, old_q, old_a):
+        super().__init__(title="修改答疑条目")
+        self.channel_id_str = channel_id_str
+        self.cog_ref = cog_ref
+        self.idx = idx # 记录要改第几个
+        
+        # 自动填入旧标题
+        self.add_item(discord.ui.InputText(
+            label="问题", 
+            value=old_q, 
+            placeholder="输入新的标题..."
+        ))
+        # 自动填入旧内容
+        self.add_item(discord.ui.InputText(
+            label="回答", 
+            value=old_a, 
+            placeholder="输入新的内容...", 
+            style=discord.InputTextStyle.long
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        config = db.get_config(self.channel_id_str)
+        if config:
+            new_q = self.children[0].value
+            new_a = self.children[1].value
+            
+            # 检查索引是否越界（防止两人同时操作导致索引变动）
+            if 0 <= self.idx < len(config["qa_list"]):
+                config["qa_list"][self.idx] = {"q": new_q, "a": new_a}
+                db.set_config(self.channel_id_str, config)
+                
+                await interaction.response.send_message(f"✅ 已成功修改问题：`{new_q}`", ephemeral=True)
+                # 刷新面板以防万一（虽然内容是在 dropdown 里展示，但刷新是个好习惯）
+                await self.cog_ref.run_refresh_logic(interaction.channel)
+            else:
+                await interaction.response.send_message("❌ 修改失败，该条目可能已被删除。", ephemeral=True)
+
+
+# ================= 其他 Modals & Select Views =================
+
 class ConfigSubRoleView(discord.ui.View):
     def __init__(self, channel_id_str):
         super().__init__(timeout=60)
@@ -147,14 +224,12 @@ class ConfigSubRoleView(discord.ui.View):
     
     @discord.ui.role_select(placeholder="选择点击按钮后要分配的身份组（可多选）", min_values=0, max_values=5)
     async def callback(self, select, interaction: discord.Interaction):
-        roles = select.values # 这是一个 Role 对象列表
+        roles = select.values 
         role_ids = [r.id for r in roles]
-        
         config = db.get_config(self.channel_id_str)
         if config:
             config["sub_role_ids"] = role_ids
             db.set_config(self.channel_id_str, config)
-            
             names = [r.name for r in roles]
             msg = f"✅ 已设置订阅身份组：`{', '.join(names)}`" if names else "✅ 已清空订阅身份组。"
             await interaction.response.send_message(msg, ephemeral=True)
@@ -253,30 +328,20 @@ class SelfPanel(discord.Cog):
         self.refresh_locks = {}
 
     async def run_refresh_logic(self, channel: discord.TextChannel):
-        """
-        真正的刷新逻辑（执行删除和重发）
-        【精准清理】：只删除标题匹配或含特定按钮的旧面板
-        """
         cid = channel.id
         if self.refresh_locks.get(cid, False): return
         self.refresh_locks[cid] = True
-
         try:
             config = db.get_config(cid)
             if not config: return
 
-            # 1. 精准扫荡旧消息
             try:
                 messages_to_delete = []
                 async for message in channel.history(limit=30):
                     if message.author.id != self.bot.user.id: continue
                     is_panel_message = False
-                    
-                    # 特征A: 标题匹配
                     if message.embeds and message.embeds[0].title == config["title"]:
                         is_panel_message = True
-                    
-                    # 特征B: 按钮 ID 匹配 (ivory_qa_btn 或 ivory_sub_btn)
                     if not is_panel_message and message.components:
                         for component in message.components:
                             if isinstance(component, discord.ActionRow):
@@ -285,7 +350,6 @@ class SelfPanel(discord.Cog):
                                         is_panel_message = True
                                         break
                             if is_panel_message: break
-                    
                     if is_panel_message:
                         messages_to_delete.append(message)
                 
@@ -297,7 +361,6 @@ class SelfPanel(discord.Cog):
             except Exception as e:
                 print(f"清理旧面板异常: {e}")
 
-            # 2. 发送新面板
             embed = discord.Embed(
                 title=config["title"],
                 description=f"作者：{config['author']} | 版本：{config['version']}\n\n{config['welcome']}\n\n---\n{config['downloads']}",
@@ -331,7 +394,6 @@ class SelfPanel(discord.Cog):
         if db.is_authorized(message.channel.id):
             await self.schedule_refresh(message.channel)
 
-    # --- 命令组 ---
     panel_group = SlashCommandGroup("自助面板", "原有的小餐车面板管理")
 
     def check_perm(self, ctx):
@@ -364,6 +426,17 @@ class SelfPanel(discord.Cog):
         if not perm: return await ctx.respond(msg, ephemeral=True)
         await ctx.send_modal(AddQAModal(str(ctx.channel.id), self))
 
+    @panel_group.command(name="修改答疑", description="修改面板中已有的自助问答")
+    async def edit_qa(self, ctx):
+        perm, msg = self.check_perm(ctx)
+        if not perm: return await ctx.respond(msg, ephemeral=True)
+        
+        config = db.get_config(ctx.channel.id)
+        if not config or not config["qa_list"]:
+            return await ctx.respond("❌ 暂无 QA 内容，请先添加。", ephemeral=True)
+            
+        await ctx.respond("请选择要修改的问题：", view=EditQAView(str(ctx.channel.id), self), ephemeral=True)
+
     @panel_group.command(name="删除答疑", description="删除面板中的自助问答")
     async def delete_qa(self, ctx):
         perm, msg = self.check_perm(ctx)
@@ -391,8 +464,6 @@ class SelfPanel(discord.Cog):
     async def config_sub_roles(self, ctx):
         perm, msg = self.check_perm(ctx)
         if not perm: return await ctx.respond(msg, ephemeral=True)
-        
-        # 发送下拉选择器
         view = ConfigSubRoleView(str(ctx.channel.id))
         await ctx.respond("请选择该频道的订阅身份组（可多选）：", view=view, ephemeral=True)
 
