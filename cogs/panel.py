@@ -49,6 +49,14 @@ class DataManager:
     def set_config(self, channel_id, config):
         self.data["channels"][str(channel_id)] = config
         self.save_data()
+    
+    # 【新增】删除配置的方法
+    def delete_config(self, channel_id):
+        if str(channel_id) in self.data["channels"]:
+            del self.data["channels"][str(channel_id)]
+            self.save_data()
+            return True
+        return False
 
     def is_authorized(self, channel_id):
         return str(channel_id) in self.data["channels"]
@@ -133,15 +141,13 @@ class QASelect(discord.ui.Select):
         else:
             await interaction.response.send_message("未找到该内容。", ephemeral=True)
 
-# ================= 新增功能核心：修改答疑组件 =================
+# ================= 编辑功能组件 =================
 
-# 1. 修改答疑的选择视图
 class EditQAView(discord.ui.View):
     def __init__(self, channel_id_str, cog_ref):
         super().__init__(timeout=60)
         self.add_item(EditQASelect(channel_id_str, cog_ref))
 
-# 2. 修改答疑的选择下拉菜单
 class EditQASelect(discord.ui.Select):
     def __init__(self, channel_id_str, cog_ref):
         self.channel_id_str = channel_id_str
@@ -151,71 +157,43 @@ class EditQASelect(discord.ui.Select):
         qa_list = config["qa_list"] if config else []
         
         options = []
-        # 列出所有问题供选择
         for idx, item in enumerate(qa_list[:25]):
             label = item["q"][:95]
             options.append(discord.SelectOption(label=label, value=str(idx), emoji="📝"))
             
-        super().__init__(
-            placeholder="👇 请选择要修改的答疑...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
+        super().__init__(placeholder="👇 请选择要修改的答疑...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         idx = int(self.values[0])
         config = db.get_config(self.channel_id_str)
-        
         if config and 0 <= idx < len(config["qa_list"]):
             item = config["qa_list"][idx]
-            # 选中后，直接弹出 Modal，并把旧的 q 和 a 传进去
             modal = EditQAModal(self.channel_id_str, self.cog_ref, idx, item["q"], item["a"])
             await interaction.response.send_modal(modal)
         else:
             await interaction.response.send_message("❌ 该条目似乎已被删除。", ephemeral=True)
 
-# 3. 修改答疑的 Modal (带自动填充)
 class EditQAModal(discord.ui.Modal):
     def __init__(self, channel_id_str, cog_ref, idx, old_q, old_a):
         super().__init__(title="修改答疑条目")
         self.channel_id_str = channel_id_str
         self.cog_ref = cog_ref
-        self.idx = idx # 记录要改第几个
-        
-        # 自动填入旧标题
-        self.add_item(discord.ui.InputText(
-            label="问题", 
-            value=old_q, 
-            placeholder="输入新的标题..."
-        ))
-        # 自动填入旧内容
-        self.add_item(discord.ui.InputText(
-            label="回答", 
-            value=old_a, 
-            placeholder="输入新的内容...", 
-            style=discord.InputTextStyle.long
-        ))
+        self.idx = idx
+        self.add_item(discord.ui.InputText(label="问题", value=old_q, placeholder="输入新的标题..."))
+        self.add_item(discord.ui.InputText(label="回答", value=old_a, placeholder="输入新的内容...", style=discord.InputTextStyle.long))
 
     async def callback(self, interaction: discord.Interaction):
         config = db.get_config(self.channel_id_str)
         if config:
             new_q = self.children[0].value
             new_a = self.children[1].value
-            
-            # 检查索引是否越界（防止两人同时操作导致索引变动）
             if 0 <= self.idx < len(config["qa_list"]):
                 config["qa_list"][self.idx] = {"q": new_q, "a": new_a}
                 db.set_config(self.channel_id_str, config)
-                
                 await interaction.response.send_message(f"✅ 已成功修改问题：`{new_q}`", ephemeral=True)
-                # 刷新面板以防万一（虽然内容是在 dropdown 里展示，但刷新是个好习惯）
                 await self.cog_ref.run_refresh_logic(interaction.channel)
             else:
                 await interaction.response.send_message("❌ 修改失败，该条目可能已被删除。", ephemeral=True)
-
-
-# ================= 其他 Modals & Select Views =================
 
 class ConfigSubRoleView(discord.ui.View):
     def __init__(self, channel_id_str):
@@ -337,11 +315,14 @@ class SelfPanel(discord.Cog):
 
             try:
                 messages_to_delete = []
+                # 扫描历史消息寻找旧面板
                 async for message in channel.history(limit=30):
                     if message.author.id != self.bot.user.id: continue
                     is_panel_message = False
+                    # 通过标题判断
                     if message.embeds and message.embeds[0].title == config["title"]:
                         is_panel_message = True
+                    # 通过按钮ID判断
                     if not is_panel_message and message.components:
                         for component in message.components:
                             if isinstance(component, discord.ActionRow):
@@ -413,6 +394,70 @@ class SelfPanel(discord.Cog):
         db.set_config(ctx.channel.id, new_config)
         await ctx.respond(f"✅ 授权成功，负责人: {manager.mention}", ephemeral=True)
 
+    # 【新增】取消授权功能
+    @panel_group.command(name="取消授权", description="[超管] 移除本频道的授权并清理面板")
+    async def revoke_channel(self, ctx):
+        # 1. 权限检查
+        if ctx.author.id != SUPER_ADMIN_ID:
+            return await ctx.respond("❌ 仅超级管理员可用", ephemeral=True)
+
+        cid = str(ctx.channel.id)
+        config = db.get_config(cid)
+
+        # 2. 检查是否已授权
+        if not config:
+            return await ctx.respond("⚠️ 此频道尚未授权或已被移除。", ephemeral=True)
+
+        await ctx.defer(ephemeral=True)
+
+        # 3. 清理 Discord 频道内的旧面板消息
+        # 逻辑：复用 run_refresh_logic 的清理部分，但不重发新面板
+        try:
+            messages_to_delete = []
+            async for message in ctx.channel.history(limit=100): 
+                if message.author.id != self.bot.user.id: continue
+                
+                is_target = False
+                
+                # 判定方式 A: Embed 标题匹配
+                if message.embeds and message.embeds[0].title == config.get("title"):
+                    is_target = True
+                
+                # 判定方式 B: 按钮 ID 匹配 (更稳健，防止标题已改)
+                if not is_target and message.components:
+                    for component in message.components:
+                        if isinstance(component, discord.ActionRow):
+                            for child in component.children:
+                                if hasattr(child, "custom_id") and child.custom_id in ["ivory_qa_btn", "ivory_sub_btn"]:
+                                    is_target = True
+                                    break
+                        if is_target: break
+                
+                if is_target:
+                    messages_to_delete.append(message)
+
+            if messages_to_delete:
+                if len(messages_to_delete) == 1:
+                    await messages_to_delete[0].delete()
+                else:
+                    await ctx.channel.delete_messages(messages_to_delete)
+        except Exception as e:
+            print(f"删除面板消息时出错: {e}")
+
+        # 4. 从数据库移除配置
+        success = db.delete_config(cid)
+
+        # 5. 停止可能的定时任务
+        if ctx.channel.id in self.scheduled_tasks:
+            self.scheduled_tasks[ctx.channel.id].cancel()
+            del self.scheduled_tasks[ctx.channel.id]
+        
+        # 6. 反馈
+        if success:
+            await ctx.followup.send("✅ 已取消授权，配置已删除，面板已清理。", ephemeral=True)
+        else:
+            await ctx.followup.send("❌ 删除配置时出现未知错误。", ephemeral=True)
+
     @panel_group.command(name="初始化", description="手动刷新/重发面板")
     async def setup_panel(self, ctx):
         perm, msg = self.check_perm(ctx)
@@ -430,11 +475,9 @@ class SelfPanel(discord.Cog):
     async def edit_qa(self, ctx):
         perm, msg = self.check_perm(ctx)
         if not perm: return await ctx.respond(msg, ephemeral=True)
-        
         config = db.get_config(ctx.channel.id)
         if not config or not config["qa_list"]:
             return await ctx.respond("❌ 暂无 QA 内容，请先添加。", ephemeral=True)
-            
         await ctx.respond("请选择要修改的问题：", view=EditQAView(str(ctx.channel.id), self), ephemeral=True)
 
     @panel_group.command(name="删除答疑", description="删除面板中的自助问答")
