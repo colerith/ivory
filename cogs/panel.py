@@ -505,8 +505,12 @@ class SelfPanel(discord.Cog):
 
     @panel_group.command(name="设置订阅", description="配置点击“订阅更新”按钮时分配的身份组")
     async def config_sub_roles(self, ctx):
-        perm, msg = self.check_perm(ctx)
-        if not perm: return await ctx.respond(msg, ephemeral=True)
+        if ctx.author.id != SUPER_ADMIN_ID:
+            return await ctx.respond("❌ 仅超级管理员可用", ephemeral=True)
+        
+        if not db.is_authorized(ctx.channel.id):
+            return await ctx.respond("❌ 此频道未授权，无法设置", ephemeral=True)
+
         view = ConfigSubRoleView(str(ctx.channel.id))
         await ctx.respond("请选择该频道的订阅身份组（可多选）：", view=view, ephemeral=True)
 
