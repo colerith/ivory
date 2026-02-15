@@ -1,3 +1,5 @@
+# panel.py
+
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, Option
@@ -71,21 +73,24 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(label="🗳️ 自助答疑", style=discord.ButtonStyle.primary, custom_id="ivory_qa_btn", row=0)
     async def qa_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         view = QADropdownView(str(interaction.channel_id))
         config = db.get_config(str(interaction.channel_id))
         if not config or not config["qa_list"]:
-             await interaction.response.send_message("暂无自助答疑内容。", ephemeral=True)
+             await interaction.followup.send("暂无自助答疑内容。", ephemeral=True)
              return
-        await interaction.response.send_message("请选择您遇到的问题：", view=view, ephemeral=True)
+        await interaction.followup.send("请选择您遇到的问题：", view=view, ephemeral=True)
 
     @discord.ui.button(label="🔔 订阅更新", style=discord.ButtonStyle.success, custom_id="ivory_sub_btn", row=0)
     async def sub_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         config = db.get_config(str(interaction.channel_id))
-        if not config: return
+        if not config:
+            return await interaction.followup.send("❌ 配置缺失或频道未授权。", ephemeral=True)
 
         role_ids = config.get("sub_role_ids", [])
         if not role_ids:
-            return await interaction.response.send_message("⚠️ 本频道尚未配置订阅身份组，请联系负责人设置。", ephemeral=True)
+            return await interaction.followup.send("⚠️ 本频道尚未配置订阅身份组，请联系负责人设置。", ephemeral=True)
 
         guild = interaction.guild
         member = interaction.user
@@ -102,13 +107,13 @@ class MainPanelView(discord.ui.View):
                         added_roles.append(role.name)
                         already_has = False
                     except discord.Forbidden:
-                        return await interaction.response.send_message(f"❌ 无法分配身份组 `{role.name}`，Bot 权限不足。", ephemeral=True)
+                        return await interaction.followup.send(f"❌ 无法分配身份组 `{role.name}`，Bot 权限不足。", ephemeral=True)
         
         if already_has:
-            await interaction.response.send_message("✅ 您已经订阅过了（已拥有所有相关身份组）。", ephemeral=True)
+            await interaction.followup.send("✅ 您已经订阅过了（已拥有所有相关身份组）。", ephemeral=True)
         else:
             roles_str = "`, `".join(added_roles)
-            await interaction.response.send_message(f"✅ 订阅成功！已为您添加：`{roles_str}`", ephemeral=True)
+            await interaction.followup.send(f"✅ 订阅成功！已为您添加：`{roles_str}`", ephemeral=True)
 
 class QADropdownView(discord.ui.View):
     def __init__(self, channel_id_str):
@@ -127,6 +132,7 @@ class QASelect(discord.ui.Select):
         super().__init__(placeholder="🔍 点击这里选择问题...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         idx = int(self.values[0])
         config = db.get_config(self.channel_id_str)
         if config and 0 <= idx < len(config["qa_list"]):
@@ -137,9 +143,9 @@ class QASelect(discord.ui.Select):
             
             embed = discord.Embed(title=f"Q: {qa['q']}", description=clean_text, color=config.get("color", 0xffc0cb))
             if md_images: embed.set_image(url=md_images[0])
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            await interaction.response.send_message("未找到该内容。", ephemeral=True)
+            await interaction.followup.send("未找到该内容。", ephemeral=True)
 
 # ================= 编辑功能组件 =================
 
@@ -339,6 +345,8 @@ class SelfPanel(discord.Cog):
                         await messages_to_delete[0].delete()
                     else:
                         await channel.delete_messages(messages_to_delete)
+            except discord.NotFound:
+                pass
             except Exception as e:
                 print(f"清理旧面板异常: {e}")
 
@@ -441,6 +449,8 @@ class SelfPanel(discord.Cog):
                     await messages_to_delete[0].delete()
                 else:
                     await ctx.channel.delete_messages(messages_to_delete)
+        except discord.NotFound:
+            pass
         except Exception as e:
             print(f"删除面板消息时出错: {e}")
 
