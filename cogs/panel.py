@@ -315,48 +315,68 @@ class SelfPanel(discord.Cog):
         cid = channel.id
         if self.refresh_locks.get(cid, False): return
         self.refresh_locks[cid] = True
+
         try:
             config = db.get_config(cid)
             if not config: return
 
-            try:
-                messages_to_delete = []
-                # 扫描历史消息寻找旧面板
-                async for message in channel.history(limit=30):
-                    if message.author.id != self.bot.user.id: continue
-                    is_panel_message = False
-                    # 通过标题判断
-                    if message.embeds and message.embeds[0].title == config["title"]:
-                        is_panel_message = True
-                    # 通过按钮ID判断
-                    if not is_panel_message and message.components:
-                        for component in message.components:
-                            if isinstance(component, discord.ActionRow):
-                                for child in component.children:
-                                    if hasattr(child, "custom_id") and child.custom_id in ["ivory_qa_btn", "ivory_sub_btn"]:
-                                        is_panel_message = True
-                                        break
-                            if is_panel_message: break
-                    if is_panel_message:
-                        messages_to_delete.append(message)
-                
-                if messages_to_delete:
-                    if len(messages_to_delete) == 1:
-                        await messages_to_delete[0].delete()
-                    else:
-                        await channel.delete_messages(messages_to_delete)
-            except discord.NotFound:
-                pass
-            except Exception as e:
-                print(f"清理旧面板异常: {e}")
+            last_msg_id = config.get("last_panel_id")
+            deleted_success = False
 
+            if last_msg_id:
+                try:
+                    old_msg = await channel.fetch_message(last_msg_id)
+                    await old_msg.delete()
+                    deleted_success = True
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    print(f"按ID删除旧面板失败: {e}")
+
+            if not deleted_success:
+                try:
+                    messages_to_delete = []
+                    async for message in channel.history(limit=100): # 妈妈把这里改成了 100
+                        if message.author.id != self.bot.user.id: continue
+
+                        is_panel_message = False
+                        # 判定逻辑保持不变
+                        if message.embeds and message.embeds[0].title == config["title"]:
+                            is_panel_message = True
+                        if not is_panel_message and message.components:
+                            for component in message.components:
+                                if isinstance(component, discord.ActionRow):
+                                    for child in component.children:
+                                        if hasattr(child, "custom_id") and child.custom_id in ["ivory_qa_btn", "ivory_sub_btn"]:
+                                            is_panel_message = True
+                                            break
+                                if is_panel_message: break
+
+                        if is_panel_message:
+                            messages_to_delete.append(message)
+
+                    if messages_to_delete:
+                        if len(messages_to_delete) == 1:
+                            await messages_to_delete[0].delete()
+                        else:
+                            await channel.delete_messages(messages_to_delete)
+                except Exception as e:
+                    print(f"扫描删除旧面板异常: {e}")
+
+            # --- 发送新面板 ---
             embed = discord.Embed(
                 title=config["title"],
                 description=f"作者：{config['author']} | 版本：{config['version']}\n\n{config['welcome']}\n\n---\n{config['downloads']}",
                 color=config["color"]
             )
+            embed.set_footer(text=f"最后刷新时间")
+            embed.timestamp = discord.utils.utcnow()
+
             view = MainPanelView(str(cid))
-            await channel.send(embed=embed, view=view)
+            new_msg = await channel.send(embed=embed, view=view)
+
+            config["last_panel_id"] = new_msg.id
+            db.set_config(cid, config)
 
         finally:
             self.refresh_locks[cid] = False
@@ -366,7 +386,7 @@ class SelfPanel(discord.Cog):
         if cid in self.scheduled_tasks:
             task = self.scheduled_tasks[cid]
             if not task.done(): task.cancel()
-        
+
         async def wait_and_run():
             try:
                 await asyncio.sleep(4)
