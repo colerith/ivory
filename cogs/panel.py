@@ -7,6 +7,7 @@ import json
 import os
 import asyncio
 import re
+import random
 
 DATA_FILE = "data.json"
 SUPER_ADMIN_ID = 1353777207042113576
@@ -310,10 +311,18 @@ class SelfPanel(discord.Cog):
         self.bot = bot
         self.scheduled_tasks = {}
         self.refresh_locks = {}
+        self.instance_id = random.randint(1000, 9999)
+        print(f"🤖 Bot实例 [{self.instance_id}] 已启动！正在监听...")
 
     async def run_refresh_logic(self, channel: discord.TextChannel):
         cid = channel.id
-        if self.refresh_locks.get(cid, False): return
+
+        print(f"🔍 实例 [{self.instance_id}] 正在尝试刷新频道 {cid}...")
+
+        if self.refresh_locks.get(cid, False):
+            print(f"🔒 实例 [{self.instance_id}] 发现频道 {cid} 被锁住了，跳过。")
+            return
+
         self.refresh_locks[cid] = True
 
         try:
