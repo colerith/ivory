@@ -490,10 +490,16 @@ class SelfPanel(discord.Cog):
 
     @panel_group.command(name="初始化", description="手动刷新/重发面板")
     async def setup_panel(self, ctx):
+        await ctx.defer(ephemeral=True)
+
         perm, msg = self.check_perm(ctx)
-        if not perm: return await ctx.respond(msg, ephemeral=True)
-        await ctx.respond("🔄 正在刷新...", ephemeral=True)
+
+        if not perm:
+            return await ctx.followup.send(msg, ephemeral=True)
+
+        await ctx.followup.send("🔄 正在刷新...", ephemeral=True)
         await self.run_refresh_logic(ctx.channel)
+
 
     @panel_group.command(name="新增答疑", description="向面板添加自助问答")
     async def add_qa(self, ctx):
