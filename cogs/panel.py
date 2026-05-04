@@ -8,6 +8,8 @@ import os
 import asyncio
 import re
 import random
+import copy
+import io
 
 DATA_FILE = "data.json"
 SUPER_ADMIN_ID = 1353777207042113576
@@ -39,6 +41,11 @@ class DataManager:
         else:
             self.save_data()
 
+        if not isinstance(self.data, dict):
+            self.data = {"channels": {}}
+        if "channels" not in self.data or not isinstance(self.data["channels"], dict):
+            self.data["channels"] = {}
+
     def save_data(self):
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
@@ -47,11 +54,43 @@ class DataManager:
         config = self.data["channels"].get(str(channel_id))
         if config and "sub_role_ids" not in config:
             config["sub_role_ids"] = []
-        return config
+        return copy.deepcopy(config) if config else None
 
     def set_config(self, channel_id, config):
-        self.data["channels"][str(channel_id)] = config
+        self.data["channels"][str(channel_id)] = copy.deepcopy(config)
         self.save_data()
+
+    def repair_isolation(self):
+        channels = self.data.get("channels", {})
+        normalized = {}
+        fixed_count = 0
+
+        for cid, raw_config in channels.items():
+            original = raw_config if isinstance(raw_config, dict) else {}
+
+            repaired = copy.deepcopy(DEFAULT_TEMPLATE)
+            repaired.update(copy.deepcopy(original))
+
+            if not isinstance(repaired.get("qa_list"), list):
+                repaired["qa_list"] = []
+            else:
+                repaired["qa_list"] = copy.deepcopy(repaired["qa_list"])
+
+            if not isinstance(repaired.get("sub_role_ids"), list):
+                repaired["sub_role_ids"] = []
+            else:
+                repaired["sub_role_ids"] = copy.deepcopy(repaired["sub_role_ids"])
+
+            old_json = json.dumps(original, ensure_ascii=False, sort_keys=True)
+            new_json = json.dumps(repaired, ensure_ascii=False, sort_keys=True)
+            if old_json != new_json:
+                fixed_count += 1
+
+            normalized[str(cid)] = repaired
+
+        self.data["channels"] = normalized
+        self.save_data()
+        return {"total": len(normalized), "fixed": fixed_count}
     
     # 【新增】删除配置的方法
     def delete_config(self, channel_id):
@@ -426,10 +465,27 @@ class SelfPanel(discord.Cog):
     async def auth_channel(self, ctx, manager: discord.User):
         if ctx.author.id != SUPER_ADMIN_ID:
             return await ctx.respond("❌ 仅超级管理员可用", ephemeral=True)
-        new_config = DEFAULT_TEMPLATE.copy()
+        new_config = copy.deepcopy(DEFAULT_TEMPLATE)
         new_config["manager_id"] = manager.id
         db.set_config(ctx.channel.id, new_config)
         await ctx.respond(f"✅ 授权成功，负责人: {manager.mention}", ephemeral=True)
+
+    @panel_group.command(name="修复隔离", description="[超管] 修复历史缓存并重建面板配置隔离")
+    async def repair_panel_isolation(self, ctx):
+        if ctx.author.id != SUPER_ADMIN_ID:
+            return await ctx.respond("❌ 仅超级管理员可用", ephemeral=True)
+
+        await ctx.defer(ephemeral=True)
+        result = db.repair_isolation()
+
+        # 清理运行时锁，避免历史状态影响后续刷新。
+        self.refresh_locks.clear()
+
+        await ctx.followup.send(
+            f"✅ 修复完成：共检查 `{result['total']}` 个频道，修复 `{result['fixed']}` 个频道配置。\n"
+            "后续请在对应频道执行一次 `/自助面板 初始化` 来重发最新面板。",
+            ephemeral=True,
+        )
 
     # 【新增】取消授权功能
     @panel_group.command(name="取消授权", description="[超管] 移除本频道的授权并清理面板")
@@ -558,6 +614,92 @@ class SelfPanel(discord.Cog):
 
         view = ConfigSubRoleView(str(ctx.channel.id))
         await ctx.respond("请选择该频道的订阅身份组（可多选）：", view=view, ephemeral=True)
+
+    @panel_group.command(name="导出答疑配置", description="导出当前频道面板的答疑配置（JSON）")
+    async def export_panel_qa(self, ctx):
+        perm, msg = self.check_perm(ctx)
+        if not perm:
+            return await ctx.respond(msg, ephemeral=True)
+
+        config = db.get_config(ctx.channel.id)
+        if not config:
+            return await ctx.respond("❌ 此频道未授权", ephemeral=True)
+
+        payload = {
+            "version": 1,
+            "channel_id": ctx.channel.id,
+            "qa_list": config.get("qa_list", []),
+        }
+
+        json_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        file = discord.File(
+            io.BytesIO(json_bytes),
+            filename=f"panel_qa_{ctx.channel.id}.json",
+        )
+        await ctx.respond("✅ 已导出当前频道答疑配置。", file=file, ephemeral=True)
+
+    @panel_group.command(name="导入答疑配置", description="导入 JSON 并覆盖当前频道面板答疑配置")
+    async def import_panel_qa(
+        self,
+        ctx,
+        file: discord.Attachment = Option(discord.Attachment, "上传 JSON 文件（支持导出格式或纯 qa_list 数组）"),
+    ):
+        perm, msg = self.check_perm(ctx)
+        if not perm:
+            return await ctx.respond(msg, ephemeral=True)
+
+        config = db.get_config(ctx.channel.id)
+        if not config:
+            return await ctx.respond("❌ 此频道未授权", ephemeral=True)
+
+        if not file.filename.lower().endswith(".json"):
+            return await ctx.respond("❌ 仅支持 .json 文件。", ephemeral=True)
+
+        await ctx.defer(ephemeral=True)
+
+        try:
+            raw_bytes = await file.read()
+            raw_text = raw_bytes.decode("utf-8")
+            parsed = json.loads(raw_text)
+        except UnicodeDecodeError:
+            return await ctx.followup.send("❌ 文件编码必须为 UTF-8。", ephemeral=True)
+        except json.JSONDecodeError as e:
+            return await ctx.followup.send(f"❌ JSON 格式错误：{e}", ephemeral=True)
+        except Exception as e:
+            return await ctx.followup.send(f"❌ 读取文件失败：{e}", ephemeral=True)
+
+        if isinstance(parsed, dict):
+            qa_list = parsed.get("qa_list")
+        elif isinstance(parsed, list):
+            qa_list = parsed
+        else:
+            return await ctx.followup.send("❌ 文件内容必须是对象（含 qa_list）或数组。", ephemeral=True)
+
+        if not isinstance(qa_list, list):
+            return await ctx.followup.send("❌ qa_list 必须是数组。", ephemeral=True)
+
+        normalized = []
+        for idx, item in enumerate(qa_list, start=1):
+            if not isinstance(item, dict):
+                return await ctx.followup.send(f"❌ 第 {idx} 项不是对象。", ephemeral=True)
+
+            q = item.get("q")
+            a = item.get("a")
+            if not isinstance(q, str) or not isinstance(a, str):
+                return await ctx.followup.send(f"❌ 第 {idx} 项缺少字符串类型的 q/a 字段。", ephemeral=True)
+
+            q = q.strip()
+            a = a.strip()
+            if not q:
+                return await ctx.followup.send(f"❌ 第 {idx} 项的 q 不能为空。", ephemeral=True)
+
+            normalized.append({"q": q, "a": a})
+
+        config["qa_list"] = normalized
+        db.set_config(ctx.channel.id, config)
+
+        await self.run_refresh_logic(ctx.channel)
+        await ctx.followup.send(f"✅ 导入完成，当前频道答疑共 {len(normalized)} 条。", ephemeral=True)
 
 def setup(bot):
     bot.add_cog(SelfPanel(bot))
