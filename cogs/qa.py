@@ -8,6 +8,7 @@ import re
 # ================= 配置 =================
 QA_FILE = "qa_data.json"
 ADMIN_ROLE_ID = 1420698551138385982  # 指定的有权限操作的身份组ID
+PAGE_SIZE = 25
 
 # 初始数据文本
 INITIAL_MARKDOWN = """
@@ -113,31 +114,90 @@ https://discord.com/channels/1291925535324110879/1429039503808659517
 
 # 1. 右键菜单专用的选择视图
 class RightClickSelectView(discord.ui.View):
-    def __init__(self, cog, target_message):
-        super().__init__(timeout=60)
-        self.add_item(RightClickSelect(cog, target_message))
-
-class RightClickSelect(discord.ui.Select):
-    def __init__(self, cog, target_message):
+    def __init__(self, cog, target_message, page=0):
+        super().__init__(timeout=120)
         self.cog = cog
         self.target_message = target_message
-        keys = list(cog.qa_data.keys())
+        self.keys = list(cog.qa_data.keys())
+        self.page = max(0, page)
+        self.total_pages = max(1, (len(self.keys) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self.page = min(self.page, self.total_pages - 1)
+        self.refresh_items()
+
+    def page_text(self):
+        return f"请选择要回复的条目（第 {self.page + 1}/{self.total_pages} 页）："
+
+    def get_page_slice(self):
+        start = self.page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        return start, self.keys[start:end]
+
+    def refresh_items(self):
+        self.clear_items()
+        self.add_item(RightClickSelect(self))
+
+        prev_btn = RightClickPageButton(-1)
+        next_btn = RightClickPageButton(1)
+        prev_btn.disabled = self.page <= 0
+        next_btn.disabled = self.page >= self.total_pages - 1
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+
+
+class RightClickPageButton(discord.ui.Button):
+    def __init__(self, step):
+        self.step = step
+        label = "⬅️ 上一页" if step < 0 else "下一页 ➡️"
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, RightClickSelectView):
+            return await interaction.response.send_message("❌ 视图状态异常，请重新打开菜单。", ephemeral=True)
+
+        new_page = view.page + self.step
+        new_page = max(0, min(new_page, view.total_pages - 1))
+        if new_page == view.page:
+            return await interaction.response.defer()
+
+        view.page = new_page
+        view.refresh_items()
+        await interaction.response.edit_message(content=view.page_text(), view=view)
+
+class RightClickSelect(discord.ui.Select):
+    def __init__(self, parent_view: RightClickSelectView):
+        self.parent_view = parent_view
+        start, page_keys = parent_view.get_page_slice()
+
         options = []
-        for k in keys[:25]:
+        for offset, k in enumerate(page_keys):
             label = k[:100]
-            options.append(discord.SelectOption(label=label, value=k))
+            options.append(discord.SelectOption(label=label, value=str(start + offset)))
+
+        if not options:
+            options.append(discord.SelectOption(label="暂无可用条目", value="-1", default=True))
+
         super().__init__(
             placeholder="👇 请选择要回复的答疑内容...",
             min_values=1,
             max_values=1,
-            options=options
+            options=options,
+            disabled=(len(page_keys) == 0),
         )
 
     async def callback(self, interaction: discord.Interaction):
-        query = self.values[0]
+        picked = self.values[0]
+        if picked == "-1":
+            return await interaction.response.defer()
+
+        idx = int(picked)
+        if not (0 <= idx < len(self.parent_view.keys)):
+            return await interaction.response.edit_message(content="❌ 条目不存在或已被删除，请重新打开菜单。", view=None)
+
+        query = self.parent_view.keys[idx]
         try:
-            embeds = self.cog.get_qa_payload(query)
-            await self.target_message.reply(content=None, embeds=embeds, mention_author=True)
+            embeds = self.parent_view.cog.get_qa_payload(query)
+            await self.parent_view.target_message.reply(content=None, embeds=embeds, mention_author=True)
             await interaction.response.edit_message(content=f"✅ 已成功回复关于 **{query}** 的内容！", view=None)
         except discord.Forbidden:
             await interaction.response.edit_message(content="❌ 无法回复该消息（可能我没有权限或被拉黑）。", view=None)
@@ -320,7 +380,7 @@ class QuickQA(commands.Cog):
         if not self.qa_data:
             return await ctx.respond("❌ 答疑库为空，请先添加内容。", ephemeral=True)
         view = RightClickSelectView(self, message)
-        await ctx.respond("请选择要回复的条目：", view=view, ephemeral=True)
+        await ctx.respond(view.page_text(), view=view, ephemeral=True)
 
     qa_group = SlashCommandGroup("快速答疑", "答疑库相关操作")
 

@@ -13,6 +13,7 @@ import io
 
 DATA_FILE = "data.json"
 SUPER_ADMIN_ID = 1353777207042113576
+PAGE_SIZE = 25
 
 DEFAULT_TEMPLATE = {
     "manager_id": 0,
@@ -119,7 +120,7 @@ class MainPanelView(discord.ui.View):
         if not config or not config["qa_list"]:
              await interaction.followup.send("暂无自助答疑内容。", ephemeral=True)
              return
-        await interaction.followup.send("请选择您遇到的问题：", view=view, ephemeral=True)
+        await interaction.followup.send(view.page_text(), view=view, ephemeral=True)
 
     @discord.ui.button(label="🔔 订阅更新", style=discord.ButtonStyle.success, custom_id="ivory_sub_btn", row=0)
     async def sub_callback(self, button, interaction: discord.Interaction):
@@ -156,24 +157,96 @@ class MainPanelView(discord.ui.View):
             await interaction.followup.send(f"✅ 订阅成功！已为您添加：`{roles_str}`", ephemeral=True)
 
 class QADropdownView(discord.ui.View):
-    def __init__(self, channel_id_str):
+    def __init__(self, channel_id_str, page=0):
         super().__init__(timeout=180)
-        self.add_item(QASelect(channel_id_str))
+        self.channel_id_str = channel_id_str
+        self.page = max(0, page)
+        self.refresh_items()
+
+    def get_qa_list(self):
+        config = db.get_config(self.channel_id_str)
+        if not config:
+            return []
+        return config.get("qa_list", [])
+
+    def total_pages(self):
+        qa_list = self.get_qa_list()
+        return max(1, (len(qa_list) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def page_text(self):
+        return f"请选择您遇到的问题（第 {self.page + 1}/{self.total_pages()} 页）："
+
+    def get_page_slice(self):
+        qa_list = self.get_qa_list()
+        total = max(1, (len(qa_list) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self.page = min(self.page, total - 1)
+
+        start = self.page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        return start, qa_list[start:end]
+
+    def refresh_items(self):
+        self.clear_items()
+        self.add_item(QASelect(self))
+
+        prev_btn = PanelPageButton(-1)
+        next_btn = PanelPageButton(1)
+        prev_btn.disabled = self.page <= 0
+        next_btn.disabled = self.page >= self.total_pages() - 1
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+
+
+class PanelPageButton(discord.ui.Button):
+    def __init__(self, step):
+        self.step = step
+        label = "⬅️ 上一页" if step < 0 else "下一页 ➡️"
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, QADropdownView):
+            return await interaction.response.send_message("❌ 视图状态异常，请重新打开菜单。", ephemeral=True)
+
+        new_page = view.page + self.step
+        max_page = view.total_pages() - 1
+        new_page = max(0, min(new_page, max_page))
+        if new_page == view.page:
+            return await interaction.response.defer()
+
+        view.page = new_page
+        view.refresh_items()
+        await interaction.response.edit_message(content=view.page_text(), view=view)
 
 class QASelect(discord.ui.Select):
-    def __init__(self, channel_id_str):
-        self.channel_id_str = channel_id_str
-        config = db.get_config(channel_id_str)
-        qa_list = config["qa_list"] if config else []
+    def __init__(self, parent_view: QADropdownView):
+        self.parent_view = parent_view
+        self.channel_id_str = parent_view.channel_id_str
+        start, page_items = parent_view.get_page_slice()
+
         options = []
-        for idx, item in enumerate(qa_list[:25]): 
+        for offset, item in enumerate(page_items):
             label = item["q"][:95]
-            options.append(discord.SelectOption(label=label, value=str(idx)))
-        super().__init__(placeholder="🔍 点击这里选择问题...", min_values=1, max_values=1, options=options)
+            options.append(discord.SelectOption(label=label, value=str(start + offset)))
+
+        if not options:
+            options.append(discord.SelectOption(label="暂无可用问题", value="-1", default=True))
+
+        super().__init__(
+            placeholder="🔍 点击这里选择问题...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            disabled=(len(page_items) == 0),
+        )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        idx = int(self.values[0])
+        picked = self.values[0]
+        if picked == "-1":
+            return
+
+        idx = int(picked)
         config = db.get_config(self.channel_id_str)
         if config and 0 <= idx < len(config["qa_list"]):
             qa = config["qa_list"][idx]
@@ -186,6 +259,121 @@ class QASelect(discord.ui.Select):
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             await interaction.followup.send("未找到该内容。", ephemeral=True)
+
+
+class PanelRightClickSelectView(discord.ui.View):
+    def __init__(self, cog_ref, target_message: discord.Message, page=0):
+        super().__init__(timeout=120)
+        self.cog_ref = cog_ref
+        self.target_message = target_message
+        self.page = max(0, page)
+        self.refresh_items()
+
+    def get_qa_list(self):
+        config = db.get_config(str(self.target_message.channel.id))
+        if not config:
+            return []
+        return config.get("qa_list", [])
+
+    def total_pages(self):
+        qa_list = self.get_qa_list()
+        return max(1, (len(qa_list) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def page_text(self):
+        return f"请选择要回复的条目（第 {self.page + 1}/{self.total_pages()} 页）："
+
+    def get_page_slice(self):
+        qa_list = self.get_qa_list()
+        total = max(1, (len(qa_list) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self.page = min(self.page, total - 1)
+
+        start = self.page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        return start, qa_list[start:end]
+
+    def refresh_items(self):
+        self.clear_items()
+        self.add_item(PanelRightClickSelect(self))
+
+        prev_btn = PanelRightClickPageButton(-1)
+        next_btn = PanelRightClickPageButton(1)
+        prev_btn.disabled = self.page <= 0
+        next_btn.disabled = self.page >= self.total_pages() - 1
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+
+
+class PanelRightClickPageButton(discord.ui.Button):
+    def __init__(self, step):
+        self.step = step
+        label = "⬅️ 上一页" if step < 0 else "下一页 ➡️"
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PanelRightClickSelectView):
+            return await interaction.response.send_message("❌ 视图状态异常，请重新打开菜单。", ephemeral=True)
+
+        new_page = view.page + self.step
+        max_page = view.total_pages() - 1
+        new_page = max(0, min(new_page, max_page))
+        if new_page == view.page:
+            return await interaction.response.defer()
+
+        view.page = new_page
+        view.refresh_items()
+        await interaction.response.edit_message(content=view.page_text(), view=view)
+
+
+class PanelRightClickSelect(discord.ui.Select):
+    def __init__(self, parent_view: PanelRightClickSelectView):
+        self.parent_view = parent_view
+        self.cog_ref = parent_view.cog_ref
+        self.target_message = parent_view.target_message
+        start, page_items = parent_view.get_page_slice()
+
+        options = []
+        for offset, item in enumerate(page_items):
+            label = item.get("q", "")[:95] or f"未命名问题 {start + offset + 1}"
+            options.append(discord.SelectOption(label=label, value=str(start + offset)))
+
+        if not options:
+            options.append(discord.SelectOption(label="暂无可用条目", value="-1", default=True))
+
+        super().__init__(
+            placeholder="👇 请选择要回复的答疑内容...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            disabled=(len(page_items) == 0),
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        picked = self.values[0]
+        if picked == "-1":
+            return
+
+        config = db.get_config(str(self.target_message.channel.id))
+        if not config:
+            return await interaction.followup.send("❌ 该频道未授权自助面板。", ephemeral=True)
+
+        qa_list = config.get("qa_list", [])
+        idx = int(picked)
+        if not (0 <= idx < len(qa_list)):
+            return await interaction.followup.send("❌ 条目不存在或已被删除。", ephemeral=True)
+
+        qa = qa_list[idx]
+        embeds = self.cog_ref.build_qa_embeds(config, qa)
+
+        try:
+            await self.target_message.reply(content=None, embeds=embeds, mention_author=True)
+            await interaction.followup.send(f"✅ 已回复：**{qa.get('q', '未知问题')}**", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ 无法回复该消息（可能缺少权限）。", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 发送失败：{e}", ephemeral=True)
 
 # ================= 编辑功能组件 =================
 
@@ -445,11 +633,48 @@ class SelfPanel(discord.Cog):
                     del self.scheduled_tasks[cid]
         self.scheduled_tasks[cid] = asyncio.create_task(wait_and_run())
 
+    def build_qa_embeds(self, config, qa):
+        raw_text = qa.get("a", "")
+        md_images = re.findall(r'!\[.*?\]\((https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?)\)', raw_text, re.IGNORECASE)
+        clean_text = re.sub(r'!\[.*?\]\(https?://.*?\)', '', raw_text).strip() or "（查看图片）"
+
+        embeds = []
+        main_embed = discord.Embed(
+            title=f"Q: {qa.get('q', '未命名问题')}",
+            description=clean_text,
+            color=config.get("color", 0xffc0cb),
+        )
+
+        if md_images:
+            main_embed.set_image(url=md_images[0])
+            embeds.append(main_embed)
+            for img_url in md_images[1:4]:
+                extra_embed = discord.Embed(color=config.get("color", 0xffc0cb))
+                extra_embed.set_image(url=img_url)
+                embeds.append(extra_embed)
+        else:
+            embeds.append(main_embed)
+
+        return embeds
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.id == self.bot.user.id: return
         if db.is_authorized(message.channel.id):
             await self.schedule_refresh(message.channel)
+
+    @commands.message_command(name="面板答疑")
+    async def panel_qa_context(self, ctx, message: discord.Message):
+        config = db.get_config(str(message.channel.id))
+        if not config:
+            return await ctx.respond("❌ 该频道未授权自助面板。", ephemeral=True)
+
+        qa_list = config.get("qa_list", [])
+        if not qa_list:
+            return await ctx.respond("❌ 当前频道暂无面板答疑内容。", ephemeral=True)
+
+        view = PanelRightClickSelectView(self, message)
+        await ctx.respond(view.page_text(), view=view, ephemeral=True)
 
     panel_group = SlashCommandGroup("自助面板", "原有的小餐车面板管理")
 
