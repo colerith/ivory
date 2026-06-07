@@ -565,8 +565,18 @@ class SelfPanel(discord.Cog):
         self.bot = bot
         self.scheduled_tasks = {}
         self.refresh_locks = {}
+        self.persistent_views_registered = False
         self.instance_id = random.randint(1000, 9999)
         print(f"🤖 Bot实例 [{self.instance_id}] 已启动！正在监听...")
+
+    def register_persistent_views(self):
+        if self.persistent_views_registered:
+            return
+
+        # 主面板按钮需要在 Bot 重启后重新注册，旧消息才能继续交互。
+        self.bot.add_view(MainPanelView("persistent"))
+        self.persistent_views_registered = True
+        print(f"♻️ 实例 [{self.instance_id}] 已恢复自助面板持久化交互。")
 
     async def run_refresh_logic(self, channel: discord.TextChannel):
         cid = channel.id
@@ -687,6 +697,10 @@ class SelfPanel(discord.Cog):
         if message.author.id == self.bot.user.id: return
         if db.is_authorized(message.channel.id):
             await self.schedule_refresh(message.channel)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.register_persistent_views()
 
     @commands.message_command(name="面板答疑")
     async def panel_qa_context(self, ctx, message: discord.Message):
