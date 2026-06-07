@@ -106,6 +106,20 @@ class DataManager:
 
 db = DataManager()
 
+
+def parse_qa_answer_content(raw_text):
+    images = re.findall(r'(https?://.*?\.(?:png|jpg|jpeg|gif|webp))', raw_text, re.IGNORECASE)
+    clean_text = re.sub(
+        r'!\[.*?\]\(https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?\)',
+        '',
+        raw_text,
+        flags=re.IGNORECASE,
+    )
+    for img_url in images:
+        clean_text = clean_text.replace(img_url, "")
+    clean_text = clean_text.strip() or "（请查看下方图片详情）"
+    return clean_text, images
+
 # ================= UI Views (主面板与展示) =================
 class MainPanelView(discord.ui.View):
     def __init__(self, channel_id_str):
@@ -250,13 +264,26 @@ class QASelect(discord.ui.Select):
         config = db.get_config(self.channel_id_str)
         if config and 0 <= idx < len(config["qa_list"]):
             qa = config["qa_list"][idx]
-            raw_text = qa['a']
-            md_images = re.findall(r'!\[.*?\]\((https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?)\)', raw_text, re.IGNORECASE)
-            clean_text = re.sub(r'!\[.*?\]\(https?://.*?\)', '', raw_text).strip() or "（查看图片）"
-            
-            embed = discord.Embed(title=f"Q: {qa['q']}", description=clean_text, color=config.get("color", 0xffc0cb))
-            if md_images: embed.set_image(url=md_images[0])
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            clean_text, images = parse_qa_answer_content(qa.get("a", ""))
+
+            embeds = []
+            main_embed = discord.Embed(
+                title=f"Q: {qa.get('q', '未命名问题')}",
+                description=clean_text,
+                color=config.get("color", 0xffc0cb),
+            )
+
+            if images:
+                main_embed.set_image(url=images[0])
+                embeds.append(main_embed)
+                for img_url in images[1:4]:
+                    extra_embed = discord.Embed(color=config.get("color", 0xffc0cb))
+                    extra_embed.set_image(url=img_url)
+                    embeds.append(extra_embed)
+            else:
+                embeds.append(main_embed)
+
+            await interaction.followup.send(embeds=embeds, ephemeral=True)
         else:
             await interaction.followup.send("未找到该内容。", ephemeral=True)
 
@@ -634,9 +661,7 @@ class SelfPanel(discord.Cog):
         self.scheduled_tasks[cid] = asyncio.create_task(wait_and_run())
 
     def build_qa_embeds(self, config, qa):
-        raw_text = qa.get("a", "")
-        md_images = re.findall(r'!\[.*?\]\((https?://.*?\.(?:png|jpg|jpeg|gif|webp).*?)\)', raw_text, re.IGNORECASE)
-        clean_text = re.sub(r'!\[.*?\]\(https?://.*?\)', '', raw_text).strip() or "（查看图片）"
+        clean_text, images = parse_qa_answer_content(qa.get("a", ""))
 
         embeds = []
         main_embed = discord.Embed(
@@ -645,10 +670,10 @@ class SelfPanel(discord.Cog):
             color=config.get("color", 0xffc0cb),
         )
 
-        if md_images:
-            main_embed.set_image(url=md_images[0])
+        if images:
+            main_embed.set_image(url=images[0])
             embeds.append(main_embed)
-            for img_url in md_images[1:4]:
+            for img_url in images[1:4]:
                 extra_embed = discord.Embed(color=config.get("color", 0xffc0cb))
                 extra_embed.set_image(url=img_url)
                 embeds.append(extra_embed)
