@@ -10,6 +10,9 @@ import re
 import random
 import copy
 import io
+import logging
+
+log = logging.getLogger(__name__)
 
 DATA_FILE = "data.json"
 SUPER_ADMIN_ID = 1353777207042113576
@@ -566,6 +569,7 @@ class SelfPanel(discord.Cog):
         self.scheduled_tasks = {}
         self.refresh_locks = {}
         self.persistent_views_registered = False
+        self.startup_panels_started = False
         self.instance_id = random.randint(1000, 9999)
         print(f"🤖 Bot实例 [{self.instance_id}] 已启动！正在监听...")
 
@@ -701,6 +705,26 @@ class SelfPanel(discord.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         self.register_persistent_views()
+        # READY 可能因重新连接多次触发；每个进程只执行一次启动重发。
+        if self.startup_panels_started:
+            return
+        self.startup_panels_started = True
+        channel_ids = list(db.data['channels'])
+        for index, channel_id in enumerate(channel_ids):
+            if index:
+                await asyncio.sleep(2)
+            try:
+                # 等待期间可能被取消授权。
+                if not db.is_authorized(channel_id):
+                    continue
+                channel = self.bot.get_channel(int(channel_id))
+                if channel is None:
+                    channel = await self.bot.fetch_channel(int(channel_id))
+                await self.run_refresh_logic(channel)
+                log.info('启动面板恢复完成：频道 %s', channel_id)
+            except Exception:
+                # 单个频道删除、权限不足等问题不阻断其他频道，也不循环重试。
+                log.exception('启动面板恢复失败：频道 %s', channel_id)
 
     @commands.message_command(name="面板答疑")
     async def panel_qa_context(self, ctx, message: discord.Message):

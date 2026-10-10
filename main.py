@@ -46,10 +46,10 @@ def main():
         with ConnectionGuard(BASE_DIR / '.runtime') as guard:
             guard.before_login()
             intents = discord.Intents.default()
-            intents.members = True
             bot = GuardedBot(guard, intents=intents)
             for path in sorted((BASE_DIR / 'cogs').glob('*.py')):
-                if path.stem != '__init__':
+                # 暂停身份组迁移；不再申请 Server Members Intent。
+                if path.stem not in {'__init__', 'migration'}:
                     bot.load_extension(f'cogs.{path.stem}')
                     log.info('已加载插件: %s', path.name)
             bot.run(token, reconnect=True)
@@ -58,7 +58,7 @@ def main():
     except discord.LoginFailure:
         log.error('Token 无效或已被重置，请在开发者后台获取新 Token 并更新 .env。')
     except discord.PrivilegedIntentsRequired:
-        log.error('请在 Discord 开发者后台启用 Server Members Intent 后重新启动。')
+        log.error('Discord 拒绝了特权 Intent，请核对部署代码与开发者后台配置。')
     except Exception:
         log.exception('机器人停止；请检查错误后重新启动。')
 
